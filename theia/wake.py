@@ -1,4 +1,5 @@
 import re
+from queue import Empty
 from threading import Event
 
 from PySide6.QtCore import QObject, QRunnable, Signal
@@ -36,19 +37,27 @@ class WakeSignals(QObject):
 
 
 class WakeJob(QRunnable):
-    def __init__(self, assistant, voice, preview_decoder):
+    def __init__(self, assistant, voice, preview_decoder, announcements):
         super().__init__()
         self.assistant = assistant
         self.transcribe = assistant.whisper.transcribe
         self.voice = voice
         self.preview_decoder = preview_decoder
+        self.announcements = announcements
         self.stop = Event()
+        self.capture = None
         self.playback = None
         self.signals = WakeSignals()
 
     def abort(self):
         self.stop.set()
+        self.announcement_ready()
         self.stop_speaking()
+
+    def announcement_ready(self):
+        capture = self.capture
+        if capture is not None:
+            capture.set()
 
     def stop_speaking(self):
         playback = self.playback
@@ -110,16 +119,28 @@ class WakeJob(QRunnable):
             command = transcript if addressed is None else addressed
 
     def hear(self, status, *, wake_only=False, start_timeout=None, prompt=""):
-        if self.stop.is_set():
-            return ""
-        self.signals.status.emit(status)
         prompt = WAKE_PROMPT if wake_only else prompt
         accept = (lambda text: wake_command(text) is not None) if wake_only else None
-        take = PreviewTake(self.preview_decoder, self.stop, prompt=prompt, accept=accept)
-        try:
-            audio = listen_for_speech(self.stop, start_timeout=start_timeout, snapshot=take.offer)
-        finally:
-            take.close()
+        while not self.stop.is_set():
+            self.capture = capture = Event()
+            try:
+                self.announce_reminders()
+                if self.stop.is_set():
+                    return ""
+                if capture.is_set():
+                    continue
+                self.signals.status.emit(status)
+                take = PreviewTake(self.preview_decoder, capture, prompt=prompt, accept=accept)
+                try:
+                    audio = listen_for_speech(capture, start_timeout=start_timeout, snapshot=take.offer)
+                finally:
+                    take.close()
+            finally:
+                self.capture = None
+            if audio is not None or not capture.is_set():
+                break
+        else:
+            return ""
         if audio is None or self.stop.is_set():
             return ""
         self.signals.status.emit("Transcribing")
@@ -131,33 +152,46 @@ class WakeJob(QRunnable):
             self.signals.message.emit("System", str(error))
             return ""
 
+    def announce_reminders(self):
+        while not self.stop.is_set():
+            try:
+                announcement = self.announcements.get_nowait()
+            except Empty:
+                return
+            if not self.say(announcement):
+                self.announcements.put(announcement)
+                return
+
     def respond(self, text, *, speech=None, message=""):
         if self.stop.is_set():
             return
         self.signals.message.emit(NAME, text)
         spoken_text = text if speech is None else speech
         if self.voice and spoken_text:
-            self.playback = Event()
-            if self.stop.is_set():
-                return
-            self.signals.status.emit("Speaking")
-            try:
-                pace = self.assistant.speaking_pace(message)
-                interruption = self.assistant.interruption
-                route = interruption.route if message else None
-                if route is not None:
-                    try:
-                        interruption.play(spoken_text, self.assistant.whisper, route, self.stop,
-                                          self.playback, length_scale=pace)
-                    except AssistantError as error:
-                        interruption.disable()
-                        self.signals.message.emit("System", f"Spoken interruption turned off. {error}")
-                        if not self.playback.is_set() and not self.stop.is_set():
-                            speak(spoken_text, cancel=self.playback, length_scale=pace)
-                else:
-                    speak(spoken_text, cancel=self.playback, length_scale=pace)
-            except OperationCancelled:
-                pass
-            except AssistantError as error:
-                self.signals.message.emit("System", str(error))
-            self.stop.wait(0.15)
+            self.say(spoken_text, message=message)
+
+    def say(self, text, *, message=""):
+        self.playback = Event()
+        if self.stop.is_set():
+            return False
+        self.signals.status.emit("Speaking")
+        try:
+            pace = self.assistant.speaking_pace(message)
+            interruption = self.assistant.interruption
+            route = interruption.route if message else None
+            if route is not None:
+                try:
+                    interruption.play(text, self.assistant.whisper, route, self.stop, self.playback, length_scale=pace)
+                except AssistantError as error:
+                    interruption.disable()
+                    self.signals.message.emit("System", f"Spoken interruption turned off. {error}")
+                    if not self.playback.is_set() and not self.stop.is_set():
+                        speak(text, cancel=self.playback, length_scale=pace)
+            else:
+                speak(text, cancel=self.playback, length_scale=pace)
+        except OperationCancelled:
+            pass
+        except AssistantError as error:
+            self.signals.message.emit("System", str(error))
+        self.stop.wait(0.15)
+        return True

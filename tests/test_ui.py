@@ -141,11 +141,14 @@ class WindowTests(unittest.TestCase):
         reminder = "Check the oven"
         self.assistant.reminders.add(time.time() - 10, reminder)
         self.assistant.reminders.add(time.time() + 3_600, "Next timer")
-        with patch("theia.ui.send_notification") as notify:
+        with patch("theia.ui.send_notification") as notify, patch("theia.ui.speak") as speak:
             window = self.open_window()
+            self.assertFalse(window.voice.isChecked())
             self.wait_until(lambda: notify.called)
             notify.assert_called_once_with(reminder)
+            self.wait_for_reply(window)
             window.check_reminders()
+            speak.assert_called_once_with("Reminder. Check the oven", cancel=ANY, length_scale=None)
         self.assertEqual(window.transcript.toPlainText().count(reminder), 1)
         window.show_reminders()
         dialog = window.reminders_dialog
@@ -155,6 +158,79 @@ class WindowTests(unittest.TestCase):
         dialog.cancel_item.click()
         self.assertEqual(dialog.items.count(), 0)
         self.assertEqual(self.assistant.reminders.pending(), [])
+
+    def test_reminder_pauses_hands_free_capture_and_reopens_the_follow_up(self):
+        self.assistant.voice_unavailable_reason = ""
+        self.assistant.whisper = SimpleNamespace(transcribe=lambda wav, **_: wav.decode())
+        self.assistant.reminders.take_due = Mock(return_value=[])
+        audio = queue.Queue()
+        mic_open = Event()
+        follow_up_open = Event()
+        mic_state_during_playback = []
+
+        def listen(stop, *, start_timeout, snapshot):
+            mic_open.set()
+            try:
+                if start_timeout is not None:
+                    follow_up_open.set()
+                while not stop.is_set():
+                    try:
+                        return audio.get(timeout=0.02)
+                    except queue.Empty:
+                        pass
+                return None
+            finally:
+                mic_open.clear()
+
+        def play(text, **kwargs):
+            mic_state_during_playback.append(mic_open.is_set())
+
+        window = self.open_window()
+        self.addCleanup(window.hands_free.setChecked, False)
+        with (
+            patch("theia.wake.listen_for_speech", side_effect=listen),
+            patch("theia.wake.speak", side_effect=play) as speak,
+            patch("theia.ui.send_notification"),
+        ):
+            window.hands_free.setChecked(True)
+            window.voice.setChecked(False)
+            audio.put(b"Hey Theia, check memory.")
+            self.wait_until(follow_up_open.is_set)
+            self.assistant.reminders.take_due.return_value = [SimpleNamespace(label="Timer finished")]
+            window.check_reminders()
+            self.assistant.reminders.take_due.return_value = []
+            self.wait_until(lambda: speak.called and mic_open.is_set())
+            audio.put(b"Check CPU.")
+            self.wait_until(lambda: self.assistant.prepare_reply.call_count == 2)
+            window.hands_free.setChecked(False)
+            self.wait_until(lambda: window.listener is None)
+        speak.assert_called_once_with("Reminder. Timer finished", cancel=ANY, length_scale=None)
+        self.assertEqual(mic_state_during_playback, [False])
+        self.assertEqual(self.assistant.prepare_reply.call_args.args, ("Check CPU.",))
+
+    def test_reminder_waits_for_current_reply_to_finish(self):
+        self.assistant.reminders.take_due = Mock(return_value=[])
+        reply_started = Event()
+        release_reply = Event()
+        self.addCleanup(release_reply.set)
+
+        def play(text, **kwargs):
+            if text == "Here is your CPU usage.":
+                reply_started.set()
+                release_reply.wait(3)
+
+        window = self.open_window()
+        with patch("theia.ui.speak", side_effect=play) as speak, patch("theia.ui.send_notification"):
+            window.voice.setChecked(True)
+            window.send_message("Check CPU")
+            self.wait_until(reply_started.is_set)
+            self.assistant.reminders.take_due.return_value = [SimpleNamespace(label="Check mail")]
+            window.check_reminders()
+            self.assistant.reminders.take_due.return_value = []
+            self.assertEqual(speak.call_count, 1)
+            release_reply.set()
+            self.wait_for_reply(window)
+        self.assertEqual([args.args[0] for args in speak.call_args_list], ["Here is your CPU usage.", "Reminder. Check mail"])
 
     def test_attachment_is_loaded_in_the_worker_and_removed_from_the_window(self):
         directory = TemporaryDirectory()

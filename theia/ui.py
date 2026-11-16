@@ -1,5 +1,6 @@
 from html import escape
 from pathlib import Path
+from queue import Empty, Queue
 from threading import Event, Thread
 
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
@@ -64,6 +65,9 @@ class Job(QRunnable):
     def run(self):
         try:
             if self.cancel.is_set():
+                return
+            if self.action == "announce_reminder":
+                speak(self.message, cancel=self.playback, length_scale=self.assistant.speaking_pace(""))
                 return
             if self.action == "draft_recap":
                 text = self.assistant.draft_recap()
@@ -149,6 +153,7 @@ class Window(QMainWindow):
         self.correcting = False
         self.reminders_dialog = None
         self.reminders_error = False
+        self.announcements = Queue()
         self.reviewing_recap = False
         assistant.read_clipboard = ClipboardReader(self).read
         self.preview_decoder = None
@@ -404,7 +409,7 @@ class Window(QMainWindow):
         dialog.exec()
         dialog.deleteLater()
         self.reviewing_recap = False
-        self.start_listening()
+        self.start_background_work()
 
     def explain_copied_text(self):
         self.send_message(COPY_COMMAND.capitalize())
@@ -433,9 +438,14 @@ class Window(QMainWindow):
         self.reminders_error = False
         for item in due:
             self.add_message("System", f"Reminder due · {item.label}")
+            self.announcements.put(f"Reminder. {item.label}")
         if due:
             notification = due[0].label if len(due) == 1 else f"{len(due)} reminders are due. Open Theia to see them."
             Thread(target=send_notification, args=(notification,), daemon=True).start()
+            if self.listener is not None:
+                self.listener.announcement_ready()
+            else:
+                self.start_background_work()
         if self.reminders_dialog is not None:
             self.reminders_dialog.refresh()
 
@@ -561,7 +571,11 @@ class Window(QMainWindow):
         self.job.signals.finished.connect(self.finish_job)
         self.set_busy(True)
         status = "Recording" if stop is not None else "Thinking"
-        self.set_status("Speaking" if preview else "Loading file" if attachment else status)
+        if preview or action == "announce_reminder":
+            status = "Speaking"
+        elif attachment:
+            status = "Loading file"
+        self.set_status(status)
         self.pool.start(self.job)
 
     def set_busy(self, busy):
@@ -603,12 +617,12 @@ class Window(QMainWindow):
             return
         self.set_busy(False)
         self.set_status("Ready")
-        self.start_listening()
+        self.start_background_work()
 
     def toggle_listening(self, enabled):
         if enabled:
             self.voice.setChecked(True)
-            self.start_listening()
+            self.start_background_work()
         elif self.listener is not None:
             self.listener.abort()
             if self.job is None:
@@ -618,11 +632,19 @@ class Window(QMainWindow):
         if self.listener is not None:
             self.listener.voice = enabled
 
-    def start_listening(self):
-        if (not self.hands_free.isChecked() or self.job is not None or self.listener is not None
-                or self.reviewing_recap or self.closing):
+    def start_background_work(self):
+        if self.job is not None or self.listener is not None or self.closing:
             return
-        self.listener = WakeJob(self.assistant, self.voice.isChecked(), self.preview_decoder)
+        try:
+            announcement = self.announcements.get_nowait()
+        except Empty:
+            pass
+        else:
+            self.start_job(announcement, None, action="announce_reminder")
+            return
+        if not self.hands_free.isChecked() or self.reviewing_recap:
+            return
+        self.listener = WakeJob(self.assistant, self.voice.isChecked(), self.preview_decoder, self.announcements)
         self.listener.signals.status.connect(self.listener_status)
         self.listener.signals.message.connect(self.listener_message)
         self.listener.signals.heard.connect(self.listener_heard)
@@ -654,7 +676,7 @@ class Window(QMainWindow):
             self.close()
         elif self.job is None:
             self.set_status("Ready")
-            self.start_listening()
+            self.start_background_work()
 
     def closeEvent(self, event):
         if self.job is not None or self.listener is not None:

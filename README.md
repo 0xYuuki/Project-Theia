@@ -142,7 +142,7 @@ Say or type “Set a timer for 10 minutes,” “Remind me in 20 minutes to chec
 
 You can start with “Remind me at six.” When Theia asks, say “PM,” then “Check the oven.” Say “Cancel that” to discard the unfinished reminder. A hands-free draft ends when the follow-up window expires. If you use typed chat or **Record**, respond to each follow-up within 60 seconds.
 
-Theia posts a chat message when a reminder is due. Install `libnotify` with `sudo dnf install libnotify` to enable Fedora desktop notifications. Pending reminders persist across restarts. Keep Theia running to receive them on time, or see overdue reminders when you reopen it.
+Theia reads timers and reminders out loud when they are due, even with **Speak replies** off. The alert also appears in chat. Install `libnotify` with `sudo dnf install libnotify` to enable Fedora desktop notifications. Pending reminders persist across restarts. Keep Theia running to receive them on time, or hear overdue reminders when you reopen it.
 
 ## Enable optional OpenAI chat
 

@@ -13,6 +13,7 @@ from theia.audio import encode_wav
 from theia.commands import launch, local_reply, system_usage
 from theia.errors import AssistantError, NoSpeechDetected
 from theia.ollama import OllamaChat
+from theia.tone import BRIGHT, GENTLE, WARM
 from theia.whisper import ACCURATE_MODEL, FAST_MODEL, WhisperTranscriber
 
 
@@ -117,6 +118,25 @@ class AssistantTests(unittest.TestCase):
         self.assertIn("local time", assistant.reply("what time is it", recorded=True))
         self.assertEqual(assistant.history, [])
         assistant.client.responses.create.assert_not_called()
+
+    def test_chat_style_tracks_explicit_feelings(self):
+        with patch.dict(os.environ, {}, clear=True), patch(
+            "theia.assistant.dotenv_values", return_value={"THEIA_CHAT_BACKEND": "ollama"},
+        ):
+            assistant = Assistant()
+        assistant.ollama.reply = Mock(return_value="Reply")
+        cases = (
+            ("I'm excited about my new job.", BRIGHT),
+            ("I feel really frustrated today.", GENTLE),
+            ("I'm happy but I'm also worried.", GENTLE),
+            ("I'm not upset.", WARM),
+            ("What does “I'm sad” mean?", WARM),
+        )
+        for message, tone in cases:
+            with self.subTest(message=message):
+                assistant.reply(message)
+                system_message = assistant.ollama.reply.call_args.args[0][0]
+                self.assertTrue(system_message["content"].endswith(tone.instruction))
 
     def test_ollama_request_uses_loopback_and_displays_only_answer_content(self):
         response = MagicMock(status=200)

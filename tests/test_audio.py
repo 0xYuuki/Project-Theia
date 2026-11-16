@@ -21,8 +21,8 @@ class SpeechTests(unittest.TestCase):
             patch("theia.audio.synthesize_speech", return_value=b"wav") as synthesize,
             patch("theia.audio.subprocess.run") as play,
         ):
-            speak(reply)
-        synthesize.assert_called_once_with("The color is green.\nLeaves\nGrass\n2 * 3")
+            speak(reply, length_scale=1.08)
+        synthesize.assert_called_once_with("The color is green.\nLeaves\nGrass\n2 * 3", length_scale=1.08)
         self.assertEqual(play.call_args.kwargs["input"], b"wav")
 
     def test_speech_skips_replies_with_only_formatting(self):

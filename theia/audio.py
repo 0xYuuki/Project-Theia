@@ -115,15 +115,20 @@ def load_voice():
         raise AssistantError("Couldn't load the Piper voice. Try downloading the voice model again.") from error
 
 
-def synthesize_speech(message):
+def synthesize_speech(message, *, length_scale=None):
     voice = load_voice()
+    synthesis_config = None
+    if length_scale is not None:
+        from piper import SynthesisConfig
+
+        synthesis_config = SynthesisConfig(length_scale=length_scale)
     audio = io.BytesIO()
     with wave.open(audio, "wb") as wav:
-        voice.synthesize_wav(message, wav)
+        voice.synthesize_wav(message, wav, syn_config=synthesis_config)
     return audio.getvalue()
 
 
-def speak(message, *, cancel=None):
+def speak(message, *, cancel=None, length_scale=None):
     if cancel is not None and cancel.is_set():
         raise OperationCancelled
     document = QTextDocument()
@@ -137,7 +142,7 @@ def speak(message, *, cancel=None):
     executable = shutil.which("pw-play")
     if not executable:
         raise AssistantError("Install pipewire-utils to use spoken replies.")
-    audio = synthesize_speech(spoken_text)
+    audio = synthesize_speech(spoken_text, length_scale=length_scale)
     env = {key: value for key, value in os.environ.items() if key != "OPENAI_API_KEY"}
     try:
         run_process(

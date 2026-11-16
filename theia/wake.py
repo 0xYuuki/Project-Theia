@@ -7,6 +7,7 @@ from theia import NAME
 from theia.audio import listen_for_speech, speak
 from theia.errors import AssistantError, NoSpeechDetected, OperationCancelled, TranscriptionTimeout
 from theia.live_transcript import PreviewTake
+from theia.tone import tone_for_message
 
 
 WAKE_PROMPT = "Hey Theia. Hello Theia. Hi Theia."
@@ -75,7 +76,7 @@ class WakeJob(QRunnable):
                 except AssistantError as error:
                     self.signals.message.emit("System", str(error))
                 else:
-                    self.respond(answer)
+                    self.respond(answer, length_scale=tone_for_message(command).length_scale)
 
     def hear(self, status, *, wake_only=False, start_timeout=None):
         if self.stop.is_set():
@@ -99,14 +100,14 @@ class WakeJob(QRunnable):
             self.signals.message.emit("System", str(error))
             return ""
 
-    def respond(self, text):
+    def respond(self, text, *, length_scale=None):
         if self.stop.is_set():
             return
         self.signals.message.emit(NAME, text)
         if self.voice:
             self.signals.status.emit("Speaking")
             try:
-                speak(text, cancel=self.stop)
+                speak(text, cancel=self.stop, length_scale=length_scale)
             except AssistantError as error:
                 self.signals.message.emit("System", str(error))
             self.stop.wait(0.15)

@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QApplication
 
 from theia.assistant import Assistant
 from theia.errors import AssistantError, TranscriptionTimeout
+from theia.tone import BRIGHT
 from theia.ui import VOICE_PREVIEW, Window, style_application
 
 
@@ -79,11 +80,19 @@ class WindowTests(unittest.TestCase):
             self.assertEqual(window.status.text(), "Recording")
             window.mic.click()
             self.wait_for_reply(window)
-            speak.assert_called_once_with("<b>CPU usage</b>", cancel=ANY)
+            speak.assert_called_once_with("<b>CPU usage</b>", cancel=ANY, length_scale=None)
         self.assistant.transcribe.assert_called_once_with(b"wav", cancel=ANY)
         self.assistant.reply.assert_called_once_with("check RAM", recorded=True, cancel=ANY)
         self.assertEqual(window.heard_text.toPlainText(), "check RAM")
         self.assertTrue(window.mic.isEnabled())
+
+    def test_spoken_replies_use_the_tone_of_the_users_message(self):
+        window = self.open_window()
+        window.voice.setChecked(True)
+        with patch("theia.ui.speak") as speak:
+            window.send_message("I am excited!")
+            self.wait_for_reply(window)
+            speak.assert_called_once_with("<b>CPU usage</b>", cancel=ANY, length_scale=BRIGHT.length_scale)
 
     def test_live_preview_displays_draft_and_dispatches_final_transcript_once(self):
         self.assistant.voice_unavailable_reason = ""
@@ -211,7 +220,7 @@ class WindowTests(unittest.TestCase):
                 call("What time is it?", recorded=True, cancel=ANY),
                 call("check CPU", recorded=True, cancel=ANY),
             ])
-            self.assertIn(call("I'm listening.", cancel=ANY), speak.call_args_list)
+            self.assertIn(call("I'm listening.", cancel=ANY, length_scale=None), speak.call_args_list)
             self.assertIn("Ollama is unavailable.", window.transcript.toPlainText())
             self.assertIn("Transcription took too long.", window.transcript.toPlainText())
             self.assertNotIn("Hello there!", window.transcript.toPlainText())

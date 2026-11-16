@@ -7,6 +7,8 @@ from pathlib import Path
 
 import psutil
 
+from theia.preferences import DEFAULT_TIME_FORMAT
+
 
 APPS = {
     "firefox": ("firefox",),
@@ -14,6 +16,15 @@ APPS = {
     "terminal": ("ptyxis", "gnome-terminal", "konsole", "xfce4-terminal"),
     "calculator": ("gnome-calculator", "kcalc", "mate-calc"),
 }
+
+TIME_FORMAT_REQUEST = re.compile(
+    r"(?:please )?(?:(?:can|could|would) you )?(?:always )?"
+    r"(?:adjust|change|set|switch|use|say|remember to use)"
+    r"(?: it| (?:(?:my|the) )?time(?: format)?)?(?: in| to)? (?:a )?"
+    r"(12|24|twelve|twenty[- ]four)[ \-–‑]*(?:hours?|hrs?|h)"
+    r"(?: format| time(?: format)?| clock)?"
+    r"(?: every ?time i ask(?: you)?(?: what time it is)?| from now on| always)?"
+)
 
 
 def system_usage():
@@ -41,12 +52,26 @@ def launch(name):
     return f"{name.capitalize()} is unavailable. Install an approved desktop app and try again."
 
 
-def local_reply(message, launcher=launch):
+def normalize_command(message):
     command = " ".join(message.casefold().split())
-    command = re.sub(r"^(?:(?:hello|hey|hi)[, ]+)?(?:theia|thea|jarvis)(?: *[,!:] *| +)", "", command)
-    command = command.rstrip(".!? ")
+    command = re.sub(r"^(?:(?:hello|hey|hi)[, ]+)?(?:theia|thea|jarvis)(?: *[,.!:] *| +)", "", command)
+    return command.rstrip(".!? ")
+
+
+def local_reply(message, launcher=launch, *, preferences=None):
+    command = normalize_command(message)
+    if preferences is not None:
+        if command in {"what time format are you using", "what time format do you use"}:
+            return f"I'm using {preferences.time_format}-hour time."
+        if match := TIME_FORMAT_REQUEST.fullmatch(command):
+            time_format = 12 if match[1] in ("12", "twelve") else 24
+            preferences.set_time_format(time_format)
+            return f"I'll use {time_format}-hour time from now on."
     if command in {"help", "commands"}:
-        return "Try check CPU, check RAM, check disk, what time is it, or open firefox, files, terminal, or calculator."
+        return (
+            "Try check CPU, check RAM, check disk, what time is it, use 12-hour time, "
+            "or open firefox, files, terminal, or calculator."
+        )
     if command.startswith("open "):
         return launcher(command[5:].strip())
     command = re.sub(r"\bc[. ]+p[. ]+u\b\.?", "cpu", command)
@@ -66,5 +91,10 @@ def local_reply(message, launcher=launch):
         disk = psutil.disk_usage("/")
         return f"Root disk usage is {disk.percent:g}% ({disk.free / 1024**3:.1f} GiB free)."
     if command in {"what time is it", "time", "tell me the time"}:
-        return datetime.now().strftime("It's %H:%M local time.")
+        now = datetime.now()
+        time_format = preferences.time_format if preferences is not None else DEFAULT_TIME_FORMAT
+        if time_format == 12:
+            period = "AM" if now.hour < 12 else "PM"
+            return f"It's {now.hour % 12 or 12}:{now.minute:02d} {period} local time."
+        return now.strftime("It's %H:%M local time.")
     return None

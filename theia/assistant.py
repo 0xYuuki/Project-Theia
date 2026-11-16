@@ -8,6 +8,8 @@ from theia import NAME
 from theia.commands import local_reply
 from theia.errors import AssistantError, OperationCancelled
 from theia.ollama import DEFAULT_MODEL, OllamaChat
+from theia.preferences import Preferences
+from theia.tone import tone_for_message
 from theia.whisper import WhisperTranscriber
 
 
@@ -35,7 +37,7 @@ def api_error_message(error, action):
 
 
 class Assistant:
-    def __init__(self):
+    def __init__(self, *, preferences=None):
         settings = {
             **dotenv_values(Path(__file__).resolve().parents[1] / ".env"),
             **os.environ,
@@ -43,6 +45,7 @@ class Assistant:
         self.chat_model = settings.get("OPENAI_CHAT_MODEL") or "gpt-4.1-mini"
         self.transcription_model = settings.get("OPENAI_TRANSCRIPTION_MODEL") or "gpt-4o-mini-transcribe"
         self.history = []
+        self.preferences = preferences if preferences is not None else Preferences()
         self.chat_backend = (settings.get("THEIA_CHAT_BACKEND") or "off").strip().casefold()
         self.ollama = None
         if self.chat_backend == "ollama":
@@ -77,17 +80,18 @@ class Assistant:
     def reply(self, message, *, recorded=False, cancel=None):
         if cancel is not None and cancel.is_set():
             raise OperationCancelled
-        response = local_reply(message)
+        response = local_reply(message, preferences=self.preferences)
         if response is not None:
             return response
         prompt = {"role": "user", "content": message}
         messages = [*self.history, prompt]
+        instructions = f"{CHAT_INSTRUCTIONS} {tone_for_message(message).instruction}"
         if self.ollama is not None:
-            answer = self.ollama.reply([{"role": "system", "content": CHAT_INSTRUCTIONS}, *messages])
+            answer = self.ollama.reply([{"role": "system", "content": instructions}, *messages])
         elif recorded:
             return "I couldn't match that to a local command. Try saying “check memory” or “help.”"
         elif self.chat_backend == "openai":
-            answer = self.openai_reply(messages)
+            answer = self.openai_reply(messages, instructions)
         else:
             raise AssistantError("Set THEIA_CHAT_BACKEND to ollama or openai in .env and restart Theia to enable AI chat.")
         if cancel is not None and cancel.is_set():
@@ -95,13 +99,13 @@ class Assistant:
         self.history = [*messages, {"role": "assistant", "content": answer}][-12:]
         return answer
 
-    def openai_reply(self, messages):
+    def openai_reply(self, messages, instructions):
         if self.client is None:
             raise AssistantError("Set OPENAI_API_KEY in .env and restart to enable AI chat.")
         try:
             result = self.client.responses.create(
                 model=self.chat_model,
-                instructions=CHAT_INSTRUCTIONS,
+                instructions=instructions,
                 input=messages,
                 store=False,
             )

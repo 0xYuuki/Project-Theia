@@ -16,6 +16,7 @@ from theia.audio import record, speak
 from theia.commands import system_usage
 from theia.errors import AssistantError, OperationCancelled
 from theia.live_transcript import PreviewDecoder, PreviewTake
+from theia.tone import tone_for_message
 from theia.wake import WakeJob
 
 
@@ -65,7 +66,7 @@ class Job(QRunnable):
             self.signals.message.emit(NAME, answer)
             if self.voice:
                 self.signals.status.emit("Speaking")
-                speak(answer, cancel=self.cancel)
+                speak(answer, cancel=self.cancel, length_scale=tone_for_message(message).length_scale)
         except OperationCancelled:
             pass
         except AssistantError as error:

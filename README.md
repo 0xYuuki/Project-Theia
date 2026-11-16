@@ -21,6 +21,8 @@ If the local Whisper model is installed, start Theia and click **Record (5 s)**.
 
 Watch **Hearing you** in the Voice panel for live text as you speak. The text updates in short bursts and may change as Whisper hears more. **Last heard** shows the final transcript that Theia used. Hands-free previews appear for recognized wake phrases and their follow-up commands. OpenAI recording mode shows the final transcript after recording.
 
+Say or type **“Use 12-hour time”** to get answers like “4:35 PM” when you ask for the time. **“Use 24-hour time”** switches back. Ask **“What time format are you using?”** to check the saved preference. Theia remembers it after restart in `~/.config/theia/preferences.json`, or in `$XDG_CONFIG_HOME/theia/preferences.json` if that variable is set.
+
 ### Listen hands-free
 
 Turn on **Hands-free listening** in the **Voice** panel. Say “Hey Theia, check memory,” or say “Hello Theia” or “Hi Theia” on its own, wait for “I'm listening,” then say your command. Theia waits about seven seconds for you to start speaking after the acknowledgment.
@@ -65,6 +67,8 @@ Restart Theia to pick up the new executable. Final transcription prefers Vulkan 
 ## Hear Theia's voice
 
 In the **Voice** panel, click **Preview voice** to hear the offline English voice. Turn on **Speak replies** to hear command and chat responses.
+
+Theia uses a warm chat tone. Clear statements like “I'm excited” or “I feel frustrated” also change her wording and slightly adjust the speaking pace.
 
 On a fresh install, download Piper's [Kristin voice model](https://github.com/OHF-Voice/piper1-gpl/blob/main/docs/COMMERCIAL_USE.md) once from the project directory.
 

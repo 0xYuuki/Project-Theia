@@ -9,12 +9,13 @@ from PySide6.QtWidgets import (
     QMainWindow, QProgressBar, QPushButton, QTextBrowser, QVBoxLayout, QWidget,
 )
 
-from jarvis import NAME
-from jarvis.appearance import STYLE, BrandMark, VoiceOrb
-from jarvis.assistant import Assistant
-from jarvis.audio import record, speak
-from jarvis.commands import system_usage
-from jarvis.errors import AssistantError
+from theia import NAME
+from theia.appearance import STYLE, BrandMark, VoiceOrb
+from theia.assistant import Assistant
+from theia.audio import record, speak
+from theia.commands import system_usage
+from theia.errors import AssistantError
+from theia.wake import WakeJob
 
 
 VOICE_PREVIEW = "Hi, I'm Theia. I'm ready when you are."
@@ -80,11 +81,13 @@ class Window(QMainWindow):
         super().__init__()
         self.assistant = assistant
         self.job = None
+        self.listener = None
+        self.close_after_listening = False
         self.pool = QThreadPool(self)
         self.pool.setMaxThreadCount(1)
         self.setWindowTitle(NAME)
         self.resize(1100, 700)
-        self.setMinimumSize(720, 545)
+        self.setMinimumSize(720, 575)
 
         root = QWidget(objectName="root")
         self.setCentralWidget(root)
@@ -115,7 +118,7 @@ class Window(QMainWindow):
         body.addWidget(side)
         layout.addLayout(body, 1)
 
-        self.add_message(NAME, "Hi, I'm Theia. Send a command or press Record to speak.")
+        self.add_message(NAME, "Hi, I'm Theia. Type a command, press Record, or turn on hands-free listening.")
         self.monitor = QTimer(self)
         self.monitor.timeout.connect(self.update_metrics)
         self.monitor.start(1000)
@@ -173,10 +176,11 @@ class Window(QMainWindow):
 
         available = not self.assistant.voice_unavailable_reason
         voice_mode = "Offline transcription" if self.assistant.voice_backend == "whisper" else "OpenAI transcription"
-        caption = QLabel(voice_mode if available else "Microphone unavailable", objectName="muted")
-        caption.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        caption.setToolTip(self.assistant.voice_unavailable_reason)
-        voice.addWidget(caption)
+        self.voice_mode = voice_mode if available else "Microphone unavailable"
+        self.voice_caption = QLabel(self.voice_mode, objectName="muted")
+        self.voice_caption.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.voice_caption.setToolTip(self.assistant.voice_unavailable_reason)
+        voice.addWidget(self.voice_caption)
 
         self.mic = QPushButton("Record (5 s)", objectName="record")
         self.mic.setEnabled(available)
@@ -187,8 +191,19 @@ class Window(QMainWindow):
         self.mic.clicked.connect(self.microphone)
         voice.addWidget(self.mic)
 
+        self.hands_free = QCheckBox("Hands-free listening")
+        self.hands_free.setEnabled(available and self.assistant.voice_backend == "whisper")
+        self.hands_free.setToolTip(
+            "Say Hey Theia, Hello Theia, or Hi Theia. Audio stays on this computer."
+            if self.hands_free.isEnabled()
+            else "Hands-free listening requires offline Whisper transcription."
+        )
+        self.hands_free.toggled.connect(self.toggle_listening)
+        voice.addWidget(self.hands_free)
+
         controls = QHBoxLayout()
         self.voice = QCheckBox("Speak replies")
+        self.voice.toggled.connect(self.update_listener_voice)
         self.preview = QPushButton("Preview voice")
         self.preview.clicked.connect(self.preview_voice)
         controls.addWidget(self.voice)
@@ -259,6 +274,8 @@ class Window(QMainWindow):
             self.start_job("", None, preview=True)
 
     def start_job(self, message, stop, *, preview=False):
+        if self.listener is not None:
+            self.listener.stop.set()
         self.job = Job(self.assistant, message, stop, self.voice.isChecked(), preview=preview)
         self.job.signals.message.connect(self.add_message)
         self.job.signals.status.connect(self.set_status)
@@ -269,16 +286,17 @@ class Window(QMainWindow):
         self.pool.start(self.job)
 
     def set_busy(self, busy):
-        self.core.active = busy
         for button in (self.send, self.preview, *self.shortcuts):
             button.setEnabled(not busy)
 
     def set_status(self, status):
+        self.core.active = status != "Ready"
         self.status.setText(status)
         self.status.setProperty("active", status != "Ready")
         self.status.style().polish(self.status)
         recording = status == "Recording"
-        self.mic.setEnabled(recording or (status == "Ready" and not self.assistant.voice_unavailable_reason))
+        idle = status in ("Ready", "Waiting for wake phrase")
+        self.mic.setEnabled(recording or (idle and not self.assistant.voice_unavailable_reason))
         self.mic.setText("Stop recording" if recording else "Record (5 s)")
         self.mic.setProperty("recording", recording)
         self.mic.style().polish(self.mic)
@@ -287,6 +305,53 @@ class Window(QMainWindow):
         self.job = None
         self.set_busy(False)
         self.set_status("Ready")
+        self.start_listening()
+
+    def toggle_listening(self, enabled):
+        self.voice_caption.setText("Say “Hey Theia”" if enabled else self.voice_mode)
+        if enabled:
+            self.voice.setChecked(True)
+            self.start_listening()
+        elif self.listener is not None:
+            self.listener.stop.set()
+            if self.job is None:
+                self.set_status("Stopping listener")
+
+    def update_listener_voice(self, enabled):
+        if self.listener is not None:
+            self.listener.voice = enabled
+
+    def start_listening(self):
+        if not self.hands_free.isChecked() or self.job is not None or self.listener is not None:
+            return
+        self.listener = WakeJob(self.assistant, self.voice.isChecked())
+        self.listener.signals.status.connect(self.listener_status)
+        self.listener.signals.message.connect(self.listener_message)
+        self.listener.signals.failed.connect(self.listener_failed)
+        self.listener.signals.finished.connect(self.finish_listening)
+        self.set_status("Waiting for wake phrase")
+        self.pool.start(self.listener)
+
+    def listener_status(self, status):
+        if self.listener is not None and not self.listener.stop.is_set():
+            self.set_status(status)
+
+    def listener_message(self, sender, text):
+        if self.listener is not None and not self.listener.stop.is_set():
+            self.add_message(sender, text)
+
+    def listener_failed(self, message):
+        if self.listener is not None and not self.listener.stop.is_set():
+            self.add_message("System", message)
+            self.hands_free.setChecked(False)
+
+    def finish_listening(self):
+        self.listener = None
+        if self.close_after_listening:
+            self.close()
+        elif self.job is None:
+            self.set_status("Ready")
+            self.start_listening()
 
     def closeEvent(self, event):
         if self.job is not None:
@@ -294,6 +359,13 @@ class Window(QMainWindow):
                 self.job.stop.set()
             event.ignore()
             self.statusBar().showMessage("Wait for the current request to finish before closing.", 4000)
+            return
+        if self.listener is not None:
+            self.close_after_listening = True
+            self.hands_free.setChecked(False)
+            self.listener.stop.set()
+            self.centralWidget().setEnabled(False)
+            event.ignore()
             return
         super().closeEvent(event)
 

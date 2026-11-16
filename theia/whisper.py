@@ -3,8 +3,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from jarvis import NAME
-from jarvis.errors import AssistantError
+from theia import NAME
+from theia.errors import AssistantError, NoSpeechDetected
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -34,13 +34,15 @@ class WhisperTranscriber:
             return f"Install the Whisper model as described in the README and restart {NAME}."
         return ""
 
-    def transcribe(self, wav):
+    def transcribe(self, wav, *, prompt=""):
         if reason := self.unavailable_reason:
             raise AssistantError(reason)
         args = [
             os.path.expanduser(self.executable), "--model", str(self.model),
             "--file", "-", "--output-txt", "--output-file", "-", "--no-prints", "--no-gpu",
         ]
+        if prompt:
+            args.extend(("--prompt", prompt))
         env = {key: value for key, value in os.environ.items() if key != "OPENAI_API_KEY"}
         try:
             result = subprocess.run(
@@ -54,5 +56,5 @@ class WhisperTranscriber:
 
         text = " ".join(result.stdout.decode("utf-8", errors="replace").split())
         if not text:
-            raise AssistantError("No speech was detected. Try again.")
+            raise NoSpeechDetected("No speech was detected. Try again.")
         return text

@@ -8,7 +8,7 @@ import wave
 from functools import cache
 from pathlib import Path
 
-from jarvis.errors import AssistantError
+from theia.errors import AssistantError
 
 
 VOICE_MODEL = Path(__file__).resolve().parents[1] / ".piper-voices" / "en_US-kristin-medium.onnx"
@@ -35,13 +35,20 @@ def record(stop, seconds=5):
     except (sd.PortAudioError, ValueError) as error:
         raise AssistantError("Could not open a microphone. Check the default input in Fedora Sound settings.") from error
 
+    chunks = []
+    while not frames.empty():
+        chunks.append(frames.get_nowait())
+    pcm = b"".join(chunks)
+    if len(pcm) < 2 * (rate // 5):
+        raise AssistantError("The recording was too short. Try again.")
+    return encode_wav(pcm, rate)
+
+
+def encode_wav(pcm, rate):
     buffer = io.BytesIO()
     with wave.open(buffer, "wb") as wav:
         wav.setparams((1, 2, rate, 0, "NONE", "not compressed"))
-        while not frames.empty():
-            wav.writeframesraw(frames.get_nowait())
-        if wav.tell() < rate // 5:
-            raise AssistantError("The recording was too short. Try again.")
+        wav.writeframes(pcm)
     return buffer.getvalue()
 
 

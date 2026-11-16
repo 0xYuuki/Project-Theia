@@ -6,14 +6,14 @@ from unittest.mock import Mock, patch
 import httpx
 from openai import RateLimitError
 
-from jarvis.assistant import Assistant
-from jarvis.errors import AssistantError
-from jarvis.commands import launch, local_reply, system_usage
+from theia.assistant import Assistant
+from theia.errors import AssistantError
+from theia.commands import launch, local_reply, system_usage
 
 
 class AssistantTests(unittest.TestCase):
     def setUp(self):
-        with patch.dict(os.environ, {}, clear=True), patch("jarvis.assistant.dotenv_values", return_value={"JARVIS_VOICE_BACKEND": "openai"}):
+        with patch.dict(os.environ, {}, clear=True), patch("theia.assistant.dotenv_values", return_value={"JARVIS_VOICE_BACKEND": "openai"}):
             self.assistant = Assistant()
 
     def test_system_commands_work_offline(self):
@@ -36,15 +36,15 @@ class AssistantTests(unittest.TestCase):
         launcher.assert_called_once_with("firefox")
 
     def test_shell_payload_is_rejected(self):
-        with patch("jarvis.commands.subprocess.Popen") as start:
+        with patch("theia.commands.subprocess.Popen") as start:
             self.assertIn("Available apps", self.assistant.reply("open firefox; arbitrary command"))
             start.assert_not_called()
 
     def test_launch_uses_fixed_arguments_and_strips_key(self):
         with (
             patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}),
-            patch("jarvis.commands.shutil.which", return_value="/usr/bin/firefox"),
-            patch("jarvis.commands.subprocess.Popen") as start,
+            patch("theia.commands.shutil.which", return_value="/usr/bin/firefox"),
+            patch("theia.commands.subprocess.Popen") as start,
         ):
             self.assertIn("Launch requested", launch("firefox"))
             self.assertEqual(start.call_args.args, (["/usr/bin/firefox"],))
@@ -60,7 +60,7 @@ class AssistantTests(unittest.TestCase):
         client = Mock()
         client.responses.create.return_value = SimpleNamespace(output_text="open firefox")
         self.assistant.client = client
-        with patch("jarvis.commands.subprocess.Popen") as start:
+        with patch("theia.commands.subprocess.Popen") as start:
             for index in range(8):
                 self.assertEqual(self.assistant.reply(f"Test {index}"), "open firefox")
             start.assert_not_called()
@@ -102,10 +102,10 @@ class AssistantTests(unittest.TestCase):
     def test_whisper_transcription_uses_no_openai_client(self):
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch("jarvis.assistant.dotenv_values", return_value={}),
-            patch("jarvis.whisper.shutil.which", return_value="/path/to/whisper-cli"),
-            patch("jarvis.whisper.Path.is_file", return_value=True),
-            patch("jarvis.whisper.subprocess.run", return_value=SimpleNamespace(stdout=b" Check RAM.\n")) as run,
+            patch("theia.assistant.dotenv_values", return_value={}),
+            patch("theia.whisper.shutil.which", return_value="/path/to/whisper-cli"),
+            patch("theia.whisper.Path.is_file", return_value=True),
+            patch("theia.whisper.subprocess.run", return_value=SimpleNamespace(stdout=b" Check RAM.\n")) as run,
         ):
             assistant = Assistant()
             self.assertIsNone(assistant.client)
@@ -119,8 +119,8 @@ class AssistantTests(unittest.TestCase):
     def test_whisper_missing_binary_explains_setup(self):
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch("jarvis.assistant.dotenv_values", return_value={}),
-            patch("jarvis.whisper.shutil.which", return_value=None),
+            patch("theia.assistant.dotenv_values", return_value={}),
+            patch("theia.whisper.shutil.which", return_value=None),
         ):
             assistant = Assistant()
             self.assertIn("README", assistant.voice_unavailable_reason)

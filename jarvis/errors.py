@@ -1,2 +1,0 @@
-class AssistantError(Exception):
-    pass

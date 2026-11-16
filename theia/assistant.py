@@ -4,10 +4,10 @@ from pathlib import Path
 from dotenv import dotenv_values
 from openai import APIError, OpenAI, RateLimitError
 
-from jarvis import NAME
-from jarvis.commands import local_reply
-from jarvis.errors import AssistantError
-from jarvis.whisper import WhisperTranscriber
+from theia import NAME
+from theia.commands import local_reply
+from theia.errors import AssistantError
+from theia.whisper import WhisperTranscriber
 
 
 def api_error_message(error, action):

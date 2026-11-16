@@ -11,19 +11,21 @@ class OllamaChat:
     def __init__(self, model=DEFAULT_MODEL):
         self.model = model
 
-    def reply(self, messages):
-        payload = json.dumps({
+    def reply(self, messages, *, schema=None):
+        payload = {
             "model": self.model,
             "messages": messages,
             "stream": False,
             "think": False,
             "keep_alive": "5m",
-            "options": {"num_ctx": 4096, "num_predict": 192},
-        })
+            "options": {"num_ctx": 4096, "num_predict": 320 if schema is not None else 192},
+        }
+        if schema is not None:
+            payload["format"] = schema
         connection = HTTPConnection("127.0.0.1", 11434, timeout=120)
         try:
             connection.request(
-                "POST", "/api/chat", body=payload, headers={"Content-Type": "application/json"},
+                "POST", "/api/chat", body=json.dumps(payload), headers={"Content-Type": "application/json"},
             )
             with connection.getresponse() as response:
                 if response.status == 404:

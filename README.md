@@ -25,9 +25,9 @@ Say or type **“Use 12-hour time”** to get answers like “4:35 PM” when yo
 
 ### Listen hands-free
 
-Turn on **Hands-free listening** in the **Voice** panel. Say “Hey Theia, check memory,” or say “Hello Theia” or “Hi Theia” on its own, wait for “I'm listening,” then say your command. Theia waits about seven seconds for you to start speaking after the acknowledgment.
+Turn on **Hands-free listening** in the **Voice** panel. Say “Hey Theia, check memory,” or say “Hello Theia” or “Hi Theia” on its own, then wait for “I'm listening.” When you see **Listening for follow-up**, you have 12 seconds to start speaking. You can ask another question after each reply without repeating the wake phrase. Say “That's all,” “Goodbye,” or “End conversation” to go back to waiting for a wake phrase, or let the 12 seconds pass in silence. The **Record** button is for one request at a time.
 
-Hands-free listening starts off each time you open the app. While enabled, Theia uses the default microphone and checks speech for a wake phrase on your device. Audio stays in memory. Theia pauses the microphone while processing speech and speaking back, then listens for the next wake phrase. Turn off **Hands-free listening** or close the app to stop. You can turn **Speak replies** off if you only want on-screen responses.
+Hands-free listening starts off each time you open the app. While enabled, Theia uses the default microphone and checks speech for a wake phrase on your device. Audio stays in memory. Theia pauses the microphone while processing speech and playing replies. Turn off **Hands-free listening** or close the app to stop. You can turn **Speak replies** off if you only want on-screen responses.
 
 If you're updating an existing setup, run `.venv/bin/python -m pip install -r requirements.txt` once to install the speech detector, then restart Theia.
 
@@ -95,7 +95,7 @@ THEIA_OLLAMA_MODEL=qwen3:1.7b
 THEIA_VOICE_BACKEND=whisper
 ```
 
-With **Local AI** displayed, type a question or speak one using **Record** or a wake phrase. Theia tries desktop commands first. The local model handles other questions and keeps up to six recent AI exchanges in memory for follow-ups. Turn on **Speak replies** to hear the response. For a smaller model, pull `qwen2.5:1.5b-instruct`, update `THEIA_OLLAMA_MODEL`, and restart Theia.
+With **Local AI** displayed, type a question or speak one using **Record** or a wake phrase. Theia tries desktop commands first. The local model handles other questions and keeps up to six recent AI exchanges in memory for follow-ups. With **Speak replies** on, Theia gives you a short spoken answer and leaves the full response in the chat. For a smaller model, pull `qwen2.5:1.5b-instruct`, update `THEIA_OLLAMA_MODEL`, and restart Theia.
 
 ## Enable optional OpenAI chat
 

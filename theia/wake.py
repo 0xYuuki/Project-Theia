@@ -5,6 +5,7 @@ from PySide6.QtCore import QObject, QRunnable, Signal
 
 from theia import NAME
 from theia.audio import listen_for_speech, speak
+from theia.commands import normalize_command
 from theia.errors import AssistantError, NoSpeechDetected, OperationCancelled, TranscriptionTimeout
 from theia.live_transcript import PreviewTake
 from theia.tone import tone_for_message
@@ -12,6 +13,8 @@ from theia.tone import tone_for_message
 
 WAKE_PROMPT = "Hey Theia. Hello Theia. Hi Theia."
 WAKE_PATTERN = re.compile(r"^\s*(?:hey|hello|hi)\b[\s,.!?—-]+(?:theia|thea)\b", re.IGNORECASE)
+FOLLOW_UP_STATUS = "Listening for follow-up"
+END_PHRASES = {"that's all", "goodbye", "end conversation"}
 
 
 def wake_command(transcript):
@@ -62,21 +65,33 @@ class WakeJob(QRunnable):
             if command is None or self.stop.is_set():
                 continue
             self.signals.heard.emit(transcript)
+            self.converse(command)
+
+    def converse(self, command):
+        while not self.stop.is_set():
             if not command:
                 self.respond("I'm listening.")
-                command = self.hear("Listening for command", start_timeout=7)
-                if not command or self.stop.is_set():
-                    continue
-                self.signals.heard.emit(command)
-
-            if not self.stop.is_set():
+            elif normalize_command(command).replace("’", "'") in END_PHRASES:
+                self.respond("Talk to you later.")
+                return
+            else:
                 self.signals.status.emit("Working")
+                spoken = self.voice
                 try:
-                    answer = self.assistant.reply(command, recorded=True, cancel=self.stop)
+                    answer = self.assistant.prepare_reply(command, recorded=True, cancel=self.stop, spoken=spoken)
                 except AssistantError as error:
                     self.signals.message.emit("System", str(error))
-                else:
-                    self.respond(answer, length_scale=tone_for_message(command).length_scale)
+                    return
+                self.respond(
+                    answer.text, speech=answer.speech if spoken else "", length_scale=tone_for_message(command).length_scale,
+                )
+
+            transcript = self.hear(FOLLOW_UP_STATUS, start_timeout=12)
+            if not transcript or self.stop.is_set():
+                return
+            self.signals.heard.emit(transcript)
+            addressed = wake_command(transcript)
+            command = transcript if addressed is None else addressed
 
     def hear(self, status, *, wake_only=False, start_timeout=None):
         if self.stop.is_set():
@@ -100,14 +115,15 @@ class WakeJob(QRunnable):
             self.signals.message.emit("System", str(error))
             return ""
 
-    def respond(self, text, *, length_scale=None):
+    def respond(self, text, *, speech=None, length_scale=None):
         if self.stop.is_set():
             return
         self.signals.message.emit(NAME, text)
-        if self.voice:
+        spoken_text = text if speech is None else speech
+        if self.voice and spoken_text:
             self.signals.status.emit("Speaking")
             try:
-                speak(text, cancel=self.stop, length_scale=length_scale)
+                speak(spoken_text, cancel=self.stop, length_scale=length_scale)
             except AssistantError as error:
                 self.signals.message.emit("System", str(error))
             self.stop.wait(0.15)

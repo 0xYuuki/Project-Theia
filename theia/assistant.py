@@ -1,4 +1,7 @@
+import json
 import os
+import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import dotenv_values
@@ -14,10 +17,50 @@ from theia.whisper import WhisperTranscriber
 
 
 CHAT_INSTRUCTIONS = (
-    f"You are {NAME}, a concise desktop assistant. Answer in plain text. "
+    f"You are {NAME}, a concise desktop assistant. "
     "You have no direct access to desktop actions or live system readings. "
     "If asked for those, suggest the built-in commands."
 )
+VOICE_INSTRUCTIONS = (
+    "Reply as a JSON object with 'speech' first and 'display' second. "
+    "'speech' is the short answer you would say in a conversation. Use everyday words and contractions. "
+    "Say the main point in one or two sentences and at most 22 words. "
+    "'display' is the full answer for the screen. Add useful explanation or details there. "
+    'For example: {"speech":"Think of it as a workbench. You keep what you need close by.",'
+    '"display":"A workbench keeps the tools for your current project within reach. '
+    'Likewise, quick temporary storage holds the data your computer is actively working with."}'
+)
+VOICE_SCHEMA = {
+    "type": "object",
+    "properties": {"speech": {"type": "string"}, "display": {"type": "string"}},
+    "required": ["speech", "display"],
+    "additionalProperties": False,
+}
+SPEECH_FALLBACK = "I've put the full answer in the chat."
+
+
+@dataclass(frozen=True)
+class Reply:
+    text: str
+    speech: str
+
+
+def voice_reply(content):
+    error_message = "The local model returned an unreadable answer. Try asking again."
+    try:
+        fields = json.loads(content)
+    except ValueError as error:
+        raise AssistantError(error_message) from error
+    display = fields.get("display") if isinstance(fields, dict) else None
+    if not isinstance(display, str) or not display.strip():
+        raise AssistantError(error_message)
+
+    summary = fields.get("speech")
+    words = summary.split() if isinstance(summary, str) else []
+    speech = " ".join(words)
+    if not words or len(words) > 35 or len(re.split(r"(?<=[.!?])\s+", speech)) > 2:
+        speech = SPEECH_FALLBACK
+    return Reply(display.strip(), speech)
 
 
 def api_error_message(error, action):
@@ -78,26 +121,33 @@ class Assistant:
         return ""
 
     def reply(self, message, *, recorded=False, cancel=None):
+        return self.prepare_reply(message, recorded=recorded, cancel=cancel).text
+
+    def prepare_reply(self, message, *, recorded=False, cancel=None, spoken=False):
         if cancel is not None and cancel.is_set():
             raise OperationCancelled
         response = local_reply(message, preferences=self.preferences)
         if response is not None:
-            return response
+            return Reply(response, response)
         prompt = {"role": "user", "content": message}
         messages = [*self.history, prompt]
-        instructions = f"{CHAT_INSTRUCTIONS} {tone_for_message(message).instruction}"
+        schema = VOICE_SCHEMA if spoken and self.ollama is not None else None
+        output_format = VOICE_INSTRUCTIONS if schema is not None else "Answer in plain text."
+        instructions = f"{CHAT_INSTRUCTIONS} {output_format} {tone_for_message(message).instruction}"
         if self.ollama is not None:
-            answer = self.ollama.reply([{"role": "system", "content": instructions}, *messages])
+            answer = self.ollama.reply([{"role": "system", "content": instructions}, *messages], schema=schema)
         elif recorded:
-            return "I couldn't match that to a local command. Try saying “check memory” or “help.”"
+            response = "I couldn't match that to a local command. Try saying “check memory” or “help.”"
+            return Reply(response, response)
         elif self.chat_backend == "openai":
             answer = self.openai_reply(messages, instructions)
         else:
             raise AssistantError("Set THEIA_CHAT_BACKEND to ollama or openai in .env and restart Theia to enable AI chat.")
         if cancel is not None and cancel.is_set():
             raise OperationCancelled
-        self.history = [*messages, {"role": "assistant", "content": answer}][-12:]
-        return answer
+        reply = voice_reply(answer) if schema is not None else Reply(answer, answer)
+        self.history = [*messages, {"role": "assistant", "content": reply.text}][-12:]
+        return reply
 
     def openai_reply(self, messages, instructions):
         if self.client is None:

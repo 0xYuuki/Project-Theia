@@ -17,7 +17,7 @@ from theia.commands import system_usage
 from theia.errors import AssistantError, OperationCancelled
 from theia.live_transcript import PreviewDecoder, PreviewTake
 from theia.tone import tone_for_message
-from theia.wake import WakeJob
+from theia.wake import FOLLOW_UP_STATUS, WakeJob
 
 
 VOICE_PREVIEW = "Hi, I'm Theia. I'm ready when you are."
@@ -60,13 +60,15 @@ class Job(QRunnable):
                     return
                 self.signals.heard.emit(message)
             self.signals.status.emit("Working")
-            answer = self.assistant.reply(message, recorded=self.stop is not None, cancel=self.cancel)
+            answer = self.assistant.prepare_reply(
+                message, recorded=self.stop is not None, cancel=self.cancel, spoken=self.voice,
+            )
             if self.cancel.is_set():
                 return
-            self.signals.message.emit(NAME, answer)
+            self.signals.message.emit(NAME, answer.text)
             if self.voice:
                 self.signals.status.emit("Speaking")
-                speak(answer, cancel=self.cancel, length_scale=tone_for_message(message).length_scale)
+                speak(answer.speech, cancel=self.cancel, length_scale=tone_for_message(message).length_scale)
         except OperationCancelled:
             pass
         except AssistantError as error:
@@ -354,18 +356,23 @@ class Window(QMainWindow):
     def set_status(self, status):
         if self.closing:
             return
-        if status in ("Recording", "Listening for command") and self.preview_decoder is not None:
+        idle = status in ("Ready", "Waiting for wake phrase", FOLLOW_UP_STATUS)
+        if status == "Recording" and self.preview_decoder is not None:
             self.show_voice_text("Hearing you", "")
-        elif status in ("Ready", "Waiting for wake phrase", "Stopping listener"):
+        elif idle or status == "Stopping listener":
             self.show_voice_text("Last heard", self.last_heard)
         elif status == "Transcribing" and self.heard_label.text() == "Hearing you":
             self.heard_label.setText("Finishing transcript…")
+        caption = {
+            "Waiting for wake phrase": "Say “Hey Theia”",
+            FOLLOW_UP_STATUS: "Ask your next question",
+        }.get(status, self.voice_mode)
+        self.voice_caption.setText(caption)
         self.core.active = status != "Ready"
         self.status.setText(status)
         self.status.setProperty("active", status != "Ready")
         self.status.style().polish(self.status)
         recording = status == "Recording"
-        idle = status in ("Ready", "Waiting for wake phrase")
         self.mic.setEnabled(recording or (idle and not self.assistant.voice_unavailable_reason))
         self.mic.setText("Stop recording" if recording else "Record (5 s)")
         self.mic.setProperty("recording", recording)
@@ -381,7 +388,6 @@ class Window(QMainWindow):
         self.start_listening()
 
     def toggle_listening(self, enabled):
-        self.voice_caption.setText("Say “Hey Theia”" if enabled else self.voice_mode)
         if enabled:
             self.voice.setChecked(True)
             self.start_listening()

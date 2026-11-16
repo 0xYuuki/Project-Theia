@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, Mock, patch
 import httpx
 from openai import RateLimitError
 
-from theia.assistant import Assistant
+from theia.assistant import SPEECH_FALLBACK, VOICE_SCHEMA, Assistant, Reply
 from theia.audio import encode_wav
 from theia.commands import launch, local_reply, system_usage
 from theia.errors import AssistantError, NoSpeechDetected
@@ -90,13 +90,23 @@ class AssistantTests(unittest.TestCase):
             assistant = Assistant()
         self.assertIsNone(assistant.client)
         self.assertEqual(assistant.chat_status, "Local AI")
-        assistant.ollama.reply = Mock(side_effect=["RAM stores active data.", "open firefox"])
+        assistant.ollama.reply = Mock(side_effect=[
+            "RAM stores active data.",
+            json.dumps({"display": "open firefox", "speech": "RAM keeps active data handy."}),
+        ])
         with patch("theia.commands.subprocess.Popen") as start:
             self.assertIn("RAM usage is", assistant.reply("check memory", recorded=True))
             assistant.ollama.reply.assert_not_called()
             assistant.reply("What does RAM do?")
-            self.assertEqual(assistant.reply("Can you make that shorter?", recorded=True), "open firefox")
+            self.assertIsNone(assistant.ollama.reply.call_args.kwargs["schema"])
+            self.assertEqual(
+                assistant.prepare_reply("Can you make that shorter?", recorded=True, spoken=True),
+                Reply("open firefox", "RAM keeps active data handy."),
+            )
             start.assert_not_called()
+        self.assertEqual(assistant.ollama.reply.call_count, 2)
+        self.assertEqual(assistant.ollama.reply.call_args.kwargs["schema"], VOICE_SCHEMA)
+        self.assertEqual(assistant.history[-1], {"role": "assistant", "content": "open firefox"})
         messages = assistant.ollama.reply.call_args.args[0]
         self.assertEqual(messages[0]["role"], "system")
         self.assertEqual(messages[1:], [
@@ -104,6 +114,26 @@ class AssistantTests(unittest.TestCase):
             {"role": "assistant", "content": "RAM stores active data."},
             {"role": "user", "content": "Can you make that shorter?"},
         ])
+
+    def test_spoken_summary_falls_back_while_preserving_the_display_answer(self):
+        self.assistant.ollama = Mock()
+        cases = ({}, {"speech": " "}, {"speech": 3}, {"speech": "word " * 36}, {"speech": "One. Two. Three."})
+        for fields in cases:
+            with self.subTest(fields=fields):
+                self.assistant.ollama.reply.return_value = json.dumps({"display": "Complete answer.", **fields})
+                self.assertEqual(
+                    self.assistant.prepare_reply("Tell me a story", spoken=True),
+                    Reply("Complete answer.", SPEECH_FALLBACK),
+                )
+
+    def test_invalid_structured_replies_do_not_enter_chat_history(self):
+        self.assistant.ollama = Mock()
+        for content in ('{"display":', '["text"]', '{"speech":"Hello!"}'):
+            with self.subTest(content=content):
+                self.assistant.ollama.reply.return_value = content
+                with self.assertRaisesRegex(AssistantError, "unreadable answer"):
+                    self.assistant.prepare_reply("Tell me a story", spoken=True)
+                self.assertEqual(self.assistant.history, [])
 
     def test_local_chat_connection_error_preserves_commands_without_cloud_fallback(self):
         with patch.dict(os.environ, {}, clear=True), patch(
@@ -146,13 +176,20 @@ class AssistantTests(unittest.TestCase):
             connection = connect.return_value
             connection.getresponse.return_value = response
             self.assertEqual(OllamaChat().reply([]), "Hi!")
-        connect.assert_called_once_with("127.0.0.1", 11434, timeout=120)
-        request = connection.request.call_args
-        self.assertEqual(request.args, ("POST", "/api/chat"))
-        body = json.loads(request.kwargs["body"])
-        self.assertEqual(body["model"], "qwen3:1.7b")
-        self.assertFalse(body["think"])
-        self.assertNotIn("tools", body)
+            self.assertEqual(OllamaChat().reply([], schema=VOICE_SCHEMA), "Hi!")
+        self.assertEqual(connect.call_count, 2)
+        for args in connect.call_args_list:
+            self.assertEqual(args.args, ("127.0.0.1", 11434))
+            self.assertEqual(args.kwargs, {"timeout": 120})
+        plain, structured = connection.request.call_args_list
+        for request in (plain, structured):
+            self.assertEqual(request.args, ("POST", "/api/chat"))
+            body = json.loads(request.kwargs["body"])
+            self.assertEqual(body["model"], "qwen3:1.7b")
+            self.assertFalse(body["think"])
+            self.assertNotIn("tools", body)
+        self.assertNotIn("format", json.loads(plain.kwargs["body"]))
+        self.assertEqual(json.loads(structured.kwargs["body"])["format"], VOICE_SCHEMA)
 
     def test_transcription_sends_wav(self):
         client = Mock()

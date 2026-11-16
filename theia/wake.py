@@ -1,23 +1,16 @@
-import queue
 import re
-from collections import deque
 from threading import Event
-from time import monotonic
 
 from PySide6.QtCore import QObject, QRunnable, Signal
 
 from theia import NAME
-from theia.audio import encode_wav, speak
-from theia.errors import AssistantError, NoSpeechDetected
+from theia.audio import listen_for_speech, speak
+from theia.errors import AssistantError, NoSpeechDetected, OperationCancelled, TranscriptionTimeout
 from theia.live_transcript import PreviewTake
 
 
 WAKE_PROMPT = "Hey Theia. Hello Theia. Hi Theia."
 WAKE_PATTERN = re.compile(r"^\s*(?:hey|hello|hi)\b[\s,.!?—-]+(?:theia|thea)\b", re.IGNORECASE)
-FRAME_MS = 20
-LEAD_FRAMES = 15
-END_SILENCE_FRAMES = 35
-MAX_CLIP_FRAMES = 400
 
 
 def wake_command(transcript):
@@ -27,63 +20,6 @@ def wake_command(transcript):
     if transcript[match.end():].startswith(("'", "’")):
         return None
     return transcript[match.end():].strip(" ,.!?:;—-\t\n")
-
-
-def listen_for_speech(stop, *, start_timeout=None, snapshot=None):
-    try:
-        import sounddevice as sd
-        import webrtcvad
-    except (ImportError, OSError) as error:
-        raise AssistantError("Hands-free listening needs the project requirements and PortAudio.") from error
-
-    frames = queue.Queue(maxsize=100)
-
-    def capture(data, frame_count, time_info, status):
-        try:
-            frames.put_nowait(bytes(data))
-        except queue.Full:
-            pass
-
-    try:
-        default_rate = int(sd.query_devices(kind="input")["default_samplerate"])
-        rate = default_rate if default_rate in (8000, 16000, 32000, 48000) else 16000
-        with sd.RawInputStream(
-            samplerate=rate, channels=1, dtype="int16",
-            blocksize=rate * FRAME_MS // 1000, callback=capture,
-        ) as stream:
-            return collect_speech(frames, stream, webrtcvad.Vad(2), rate, stop, start_timeout, snapshot)
-    except (sd.PortAudioError, ValueError) as error:
-        raise AssistantError("Couldn't open the microphone. Check Fedora Sound settings.") from error
-
-
-def collect_speech(frames, stream, vad, rate, stop, start_timeout, snapshot=None):
-    deadline = None if start_timeout is None else monotonic() + start_timeout
-    lead = deque(maxlen=LEAD_FRAMES)
-    clip = []
-    silence = 0
-    while not stop.is_set():
-        if not clip and deadline is not None and monotonic() >= deadline:
-            return None
-        try:
-            frame = frames.get(timeout=0.1)
-        except queue.Empty:
-            if not stream.active:
-                raise AssistantError("The microphone disconnected.")
-            continue
-
-        voiced = vad.is_speech(frame, rate)
-        if clip:
-            clip.append(frame)
-            silence = 0 if voiced else silence + 1
-            if silence >= END_SILENCE_FRAMES or len(clip) >= MAX_CLIP_FRAMES:
-                return encode_wav(b"".join(clip), rate)
-            if snapshot is not None and voiced:
-                snapshot(clip, len(clip) * len(frame), rate)
-        else:
-            lead.append((frame, voiced))
-            if voiced and sum(is_voiced for _, is_voiced in lead) >= 5:
-                clip = [part for part, _ in lead]
-    return None
 
 
 class WakeSignals(QObject):
@@ -107,6 +43,8 @@ class WakeJob(QRunnable):
     def run(self):
         try:
             self.listen()
+        except OperationCancelled:
+            pass
         except AssistantError as error:
             if not self.stop.is_set():
                 self.signals.failed.emit(str(error))
@@ -133,7 +71,7 @@ class WakeJob(QRunnable):
             if not self.stop.is_set():
                 self.signals.status.emit("Working")
                 try:
-                    answer = self.assistant.reply(command, recorded=True)
+                    answer = self.assistant.reply(command, recorded=True, cancel=self.stop)
                 except AssistantError as error:
                     self.signals.message.emit("System", str(error))
                 else:
@@ -154,8 +92,11 @@ class WakeJob(QRunnable):
             return ""
         self.signals.status.emit("Transcribing")
         try:
-            return self.transcribe(audio, prompt=prompt)
+            return self.transcribe(audio, prompt=prompt, cancel=self.stop)
         except NoSpeechDetected:
+            return ""
+        except TranscriptionTimeout as error:
+            self.signals.message.emit("System", str(error))
             return ""
 
     def respond(self, text):
@@ -165,7 +106,7 @@ class WakeJob(QRunnable):
         if self.voice:
             self.signals.status.emit("Speaking")
             try:
-                speak(text)
+                speak(text, cancel=self.stop)
             except AssistantError as error:
                 self.signals.message.emit("System", str(error))
             self.stop.wait(0.15)

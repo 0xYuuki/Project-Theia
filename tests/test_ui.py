@@ -4,7 +4,7 @@ import time
 import unittest
 from threading import Event
 from types import SimpleNamespace
-from unittest.mock import Mock, call, patch
+from unittest.mock import ANY, Mock, call, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -13,7 +13,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from theia.assistant import Assistant
-from theia.errors import AssistantError
+from theia.errors import AssistantError, TranscriptionTimeout
 from theia.ui import VOICE_PREVIEW, Window, style_application
 
 
@@ -61,7 +61,7 @@ class WindowTests(unittest.TestCase):
         self.assertIn("Theia", window.transcript.toPlainText())
         self.assertIn("<b>CPU usage</b>", window.transcript.toPlainText())
         self.assertEqual(window.status.text(), "Ready")
-        self.assistant.reply.assert_called_once_with("check CPU", recorded=False)
+        self.assistant.reply.assert_called_once_with("check CPU", recorded=False, cancel=ANY)
 
     def test_stopping_recording_routes_transcription_and_speaks(self):
         self.assistant.voice_unavailable_reason = ""
@@ -79,9 +79,9 @@ class WindowTests(unittest.TestCase):
             self.assertEqual(window.status.text(), "Recording")
             window.mic.click()
             self.wait_for_reply(window)
-            speak.assert_called_once_with("<b>CPU usage</b>")
-        self.assistant.transcribe.assert_called_once_with(b"wav")
-        self.assistant.reply.assert_called_once_with("check RAM", recorded=True)
+            speak.assert_called_once_with("<b>CPU usage</b>", cancel=ANY)
+        self.assistant.transcribe.assert_called_once_with(b"wav", cancel=ANY)
+        self.assistant.reply.assert_called_once_with("check RAM", recorded=True, cancel=ANY)
         self.assertEqual(window.heard_text.toPlainText(), "check RAM")
         self.assertTrue(window.mic.isEnabled())
 
@@ -104,11 +104,29 @@ class WindowTests(unittest.TestCase):
             window.mic.click()
             self.wait_for_reply(window)
 
-        self.assistant.transcribe.assert_called_once_with(b"final WAV")
-        self.assistant.reply.assert_called_once_with("check RAM", recorded=True)
+        self.assistant.transcribe.assert_called_once_with(b"final WAV", cancel=ANY)
+        self.assistant.reply.assert_called_once_with("check RAM", recorded=True, cancel=ANY)
         self.assertEqual(window.heard_label.text(), "Last heard")
         self.assertEqual(window.heard_text.toPlainText(), "check RAM")
         self.assertEqual(window.transcript.toPlainText().count("check RAM"), 1)
+
+    def test_closing_during_recording_does_not_dispatch_captured_audio(self):
+        self.assistant.voice_unavailable_reason = ""
+        window = self.open_window()
+        recording = Event()
+
+        def record_until_stop(stop):
+            recording.set()
+            stop.wait(3)
+            return b"captured audio"
+
+        with patch("theia.ui.record", side_effect=record_until_stop):
+            window.mic.click()
+            self.wait_until(recording.is_set)
+            window.close()
+            self.wait_until(lambda: not window.isVisible())
+        self.assistant.transcribe.assert_not_called()
+        self.assistant.reply.assert_not_called()
 
     def test_late_preview_does_not_replace_final_text_or_delay_dispatch(self):
         self.assistant.voice_unavailable_reason = ""
@@ -135,7 +153,7 @@ class WindowTests(unittest.TestCase):
             self.wait_until(decoding.is_set)
             window.mic.click()
             self.wait_for_reply(window)
-            self.assistant.reply.assert_called_once_with("check RAM", recorded=True)
+            self.assistant.reply.assert_called_once_with("check RAM", recorded=True, cancel=ANY)
             release.set()
             self.assertTrue(window.preview_decoder.pool.waitForDone(1000))
             QTest.qWait(10)
@@ -147,7 +165,7 @@ class WindowTests(unittest.TestCase):
         with patch("theia.ui.record") as record, patch("theia.ui.speak") as speak:
             window.preview.click()
             self.wait_for_reply(window)
-            speak.assert_called_once_with(VOICE_PREVIEW)
+            speak.assert_called_once_with(VOICE_PREVIEW, cancel=ANY)
             record.assert_not_called()
         self.assistant.reply.assert_not_called()
         self.assertTrue(window.preview.isEnabled())
@@ -155,7 +173,13 @@ class WindowTests(unittest.TestCase):
 
     def test_hands_free_wakes_answers_and_rearms(self):
         self.assistant.voice_unavailable_reason = ""
-        self.assistant.whisper = SimpleNamespace(transcribe=Mock(side_effect=lambda wav, **kw: wav.decode()))
+
+        def transcribe(wav, **kwargs):
+            if wav == b"timeout":
+                raise TranscriptionTimeout("Transcription took too long.")
+            return wav.decode()
+
+        self.assistant.whisper = SimpleNamespace(transcribe=Mock(side_effect=transcribe))
         self.assistant.reply.side_effect = [AssistantError("Ollama is unavailable."), "Memory", "Time", "CPU"]
         audio = queue.Queue()
 
@@ -173,7 +197,7 @@ class WindowTests(unittest.TestCase):
             window.hands_free.setChecked(True)
             self.assertTrue(window.voice.isChecked())
             for transcript in (
-                "Hello there!", "Hey Theia, tell me a story.", "Hey Theia, check memory.", "Hello, Theia!",
+                "Hello there!", "timeout", "Hey Theia, tell me a story.", "Hey Theia, check memory.", "Hello, Theia!",
                 "What time is it?", "Hi Theia, check CPU.",
             ):
                 audio.put(transcript.encode())
@@ -182,13 +206,14 @@ class WindowTests(unittest.TestCase):
             while self.assistant.reply.call_count < 4 and time.monotonic() < deadline:
                 QTest.qWait(10)
             self.assertEqual(self.assistant.reply.call_args_list, [
-                call("tell me a story", recorded=True),
-                call("check memory", recorded=True),
-                call("What time is it?", recorded=True),
-                call("check CPU", recorded=True),
+                call("tell me a story", recorded=True, cancel=ANY),
+                call("check memory", recorded=True, cancel=ANY),
+                call("What time is it?", recorded=True, cancel=ANY),
+                call("check CPU", recorded=True, cancel=ANY),
             ])
-            self.assertIn(call("I'm listening."), speak.call_args_list)
+            self.assertIn(call("I'm listening.", cancel=ANY), speak.call_args_list)
             self.assertIn("Ollama is unavailable.", window.transcript.toPlainText())
+            self.assertIn("Transcription took too long.", window.transcript.toPlainText())
             self.assertNotIn("Hello there!", window.transcript.toPlainText())
 
             window.hands_free.setChecked(False)
@@ -234,7 +259,7 @@ class WindowTests(unittest.TestCase):
         audio = queue.Queue()
         drafts = queue.Queue()
 
-        def transcribe(wav, *, timeout=None, prompt="", preview=False):
+        def transcribe(wav, *, timeout=None, prompt="", preview=False, cancel=None):
             return drafts.get_nowait() if preview else wav.decode()
 
         def listen(stop, *, start_timeout=None, snapshot):
@@ -290,7 +315,7 @@ class WindowTests(unittest.TestCase):
             self.wait_until(lambda: window.last_heard == "What time is it?"
                             and self.assistant.reply.call_count == 2)
             self.assertEqual(self.assistant.reply.call_args_list, [
-                call("check memory", recorded=True), call("What time is it?", recorded=True),
+                call("check memory", recorded=True, cancel=ANY), call("What time is it?", recorded=True, cancel=ANY),
             ])
             self.assertNotIn("private", window.transcript.toPlainText())
             window.hands_free.setChecked(False)

@@ -7,7 +7,8 @@ from io import BytesIO
 from pathlib import Path
 
 from theia import NAME
-from theia.errors import AssistantError, NoSpeechDetected
+from theia.errors import AssistantError, NoSpeechDetected, TranscriptionTimeout
+from theia.process import run_process
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,6 +38,10 @@ class WhisperTranscriber:
             or shutil.which(str(local_cli))
             or shutil.which("whisper-cli")
         )
+        self.gpu_executable = None
+        if not settings.get("WHISPER_CLI"):
+            self.gpu_executable = shutil.which(str(LOCAL_INSTALL / "build-vulkan" / "bin" / "whisper-cli"))
+        self.vulkan_device = settings.get("WHISPER_VULKAN_DEVICE")
         models = LOCAL_INSTALL / "models"
         accurate_model = models / ACCURATE_MODEL
         fast_model = models / FAST_MODEL
@@ -55,29 +60,43 @@ class WhisperTranscriber:
             return f"Install the Whisper model as described in the README and restart {NAME}."
         return ""
 
-    def transcribe(self, wav, *, prompt="", timeout=45, preview=False):
+    def transcribe(self, wav, *, prompt="", timeout=45, preview=False, cancel=None):
         if reason := self.unavailable_reason:
             raise AssistantError(reason)
         if is_silent_wav(wav):
             raise NoSpeechDetected("No speech was detected. Try again.")
         model = self.preview_model if preview else self.model
         args = [
-            os.path.expanduser(self.executable), "--model", str(model),
-            "--file", "-", "--output-txt", "--output-file", "-", "--no-prints", "--no-gpu",
+            "--model", str(model), "--file", "-", "--output-txt", "--output-file", "-", "--no-prints",
             "--prompt", " ".join(filter(None, (prompt, COMMAND_TERMS))),
         ]
         env = {key: value for key, value in os.environ.items() if key != "OPENAI_API_KEY"}
-        try:
-            result = subprocess.run(
-                args, input=wav, env=env, stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL, check=True, timeout=timeout,
-            )
-        except subprocess.TimeoutExpired as error:
-            raise AssistantError("Offline transcription took too long. Try a shorter recording.") from error
-        except (OSError, subprocess.CalledProcessError) as error:
-            raise AssistantError("Offline transcription failed. Check the whisper.cpp installation and model.") from error
-
+        result = None
+        if self.gpu_executable and not preview:
+            gpu_env = dict(env)
+            if self.vulkan_device:
+                gpu_env["GGML_VK_VISIBLE_DEVICES"] = self.vulkan_device
+            try:
+                result = run_process(
+                    [self.gpu_executable, *args], input=wav, env=gpu_env, cancel=cancel,
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=min(timeout, 18),
+                )
+            except (OSError, subprocess.SubprocessError):
+                self.gpu_executable = None  # Keep the CPU fallback for this session.
+        if result is None:
+            result = self.transcribe_on_cpu(args, wav, env, timeout, cancel)
         text = " ".join(result.stdout.decode("utf-8", errors="replace").split())
         if not text:
             raise NoSpeechDetected("No speech was detected. Try again.")
         return text
+
+    def transcribe_on_cpu(self, args, wav, env, timeout, cancel):
+        try:
+            return run_process(
+                [os.path.expanduser(self.executable), *args, "--no-gpu"], input=wav, env=env,
+                cancel=cancel, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise TranscriptionTimeout("Offline transcription took too long. Try a shorter recording.") from error
+        except (OSError, subprocess.CalledProcessError) as error:
+            raise AssistantError("Offline transcription failed. Check the whisper.cpp installation and model.") from error

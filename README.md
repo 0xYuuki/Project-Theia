@@ -17,7 +17,7 @@ Try `help`, `check CPU`, `check RAM`, `check disk`, `what time is it`, or `open 
 
 ## Use offline voice commands
 
-If the local Whisper model is installed, start Theia and click **Record (5 s)**. Say “Theia, check memory” or “what time is it.” Click **Stop recording** to finish early. Theia recognizes speech on your CPU and suggests a retry if it can't match a local command.
+If the local Whisper model is installed, start Theia and click **Record (5 s)**. Say “Theia, check memory” or “what time is it.” Recording finishes after a short silence, or when you click **Stop recording**. Closing the window cancels a recording in progress. Theia suggests a retry if it can't match a local command.
 
 Watch **Hearing you** in the Voice panel for live text as you speak. The text updates in short bursts and may change as Whisper hears more. **Last heard** shows the final transcript that Theia used. Hands-free previews appear for recognized wake phrases and their follow-up commands. OpenAI recording mode shows the final transcript after recording.
 
@@ -47,6 +47,20 @@ bash .whisper-cpp/source/models/download-ggml-model.sh base.en "$PWD/.whisper-cp
 ```
 
 Restart Theia after setup. To upgrade a base-only installation, run the `small.en-q5_1` download command and restart. Theia uses that model for final transcripts and the base model for faster previews when both are installed. If you already have a compatible `whisper-cli` and model, set `WHISPER_CLI` and `WHISPER_MODEL_PATH` in `.env`.
+
+### Accelerate final transcription with Vulkan
+
+With a working Vulkan GPU driver, build the optional GPU executable beside the CPU build.
+
+```bash
+sudo dnf install glslc vulkan-loader-devel spirv-headers-devel
+cmake -S .whisper-cpp/source -B .whisper-cpp/build-vulkan -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_SERVER=OFF \
+  -DGGML_VULKAN=ON
+cmake --build .whisper-cpp/build-vulkan --target whisper-cli --parallel 2
+```
+
+Restart Theia to pick up the new executable. Final transcription prefers Vulkan and switches to the CPU if the Vulkan process fails. Live previews use the CPU. On a machine with multiple GPUs, use `vulkaninfo --summary` and set `WHISPER_VULKAN_DEVICE` in `.env` to the Vulkan index of the GPU you want. A custom `WHISPER_CLI` selects the CPU transcription path.
 
 ## Hear Theia's voice
 

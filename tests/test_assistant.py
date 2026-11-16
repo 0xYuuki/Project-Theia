@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
@@ -206,6 +207,29 @@ class AssistantTests(unittest.TestCase):
                 with self.assertRaises(NoSpeechDetected):
                     assistant.transcribe(encode_wav(audio, 16000), prompt="Hey Theia.")
             run.assert_not_called()
+
+    def test_whisper_keeps_previews_on_cpu_and_recovers_from_a_gpu_error(self):
+        with (
+            patch("theia.whisper.shutil.which", side_effect=lambda path: path),
+            patch("theia.whisper.Path.is_file", return_value=True),
+            patch("theia.whisper.run_process") as run,
+        ):
+            whisper = WhisperTranscriber({})
+            run.side_effect = [
+                SimpleNamespace(stdout=b"preview"),
+                subprocess.CalledProcessError(1, "whisper-cli"),
+                SimpleNamespace(stdout=b"final"),
+                SimpleNamespace(stdout=b"next"),
+            ]
+            self.assertEqual(whisper.transcribe(b"audio", preview=True), "preview")
+            self.assertEqual(whisper.transcribe(b"audio"), "final")
+            self.assertEqual(whisper.transcribe(b"audio"), "next")
+        preview, gpu, recovery, next_call = [call.args[0] for call in run.call_args_list]
+        self.assertIn("--no-gpu", preview)
+        self.assertIn("build-vulkan", gpu[0])
+        self.assertNotIn("--no-gpu", gpu)
+        self.assertIn("--no-gpu", recovery)
+        self.assertIn("--no-gpu", next_call)
 
     def test_whisper_missing_binary_explains_setup(self):
         with (

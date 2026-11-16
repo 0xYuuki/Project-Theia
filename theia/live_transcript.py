@@ -4,7 +4,7 @@ from threading import Event
 from PySide6.QtCore import QObject, QThreadPool, Signal
 
 from theia.audio import encode_wav
-from theia.errors import AssistantError
+from theia.errors import AssistantError, OperationCancelled
 
 
 class PreviewDecoder(QObject):
@@ -24,8 +24,8 @@ class PreviewDecoder(QObject):
         if not take.active:
             return
         try:
-            text = self.transcribe(audio, prompt=take.prompt, timeout=3, preview=True)
-        except AssistantError:
+            text = self.transcribe(audio, prompt=take.prompt, timeout=3, preview=True, cancel=take.closed)
+        except (AssistantError, OperationCancelled):
             return
         if take.active and text and (take.accept is None or take.accept(text)):
             self.heard.emit(take, text)

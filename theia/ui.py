@@ -14,7 +14,7 @@ from theia.appearance import STYLE, BrandMark, VoiceOrb
 from theia.assistant import Assistant
 from theia.audio import record, speak
 from theia.commands import system_usage
-from theia.errors import AssistantError
+from theia.errors import AssistantError, OperationCancelled
 from theia.live_transcript import PreviewDecoder, PreviewTake
 from theia.wake import WakeJob
 
@@ -35,6 +35,7 @@ class Job(QRunnable):
         self.assistant = assistant
         self.message = message
         self.stop = stop
+        self.cancel = Event()
         self.voice = voice
         self.preview = preview
         self.preview_decoder = preview_decoder
@@ -42,21 +43,31 @@ class Job(QRunnable):
 
     def run(self):
         try:
+            if self.cancel.is_set():
+                return
             if self.preview:
-                speak(VOICE_PREVIEW)
+                speak(VOICE_PREVIEW, cancel=self.cancel)
                 return
             message = self.message
             if self.stop is not None:
                 wav = self.record_voice()
+                if self.cancel.is_set():
+                    return
                 self.signals.status.emit("Transcribing")
-                message = self.assistant.transcribe(wav)
+                message = self.assistant.transcribe(wav, cancel=self.cancel)
+                if self.cancel.is_set():
+                    return
                 self.signals.heard.emit(message)
             self.signals.status.emit("Working")
-            answer = self.assistant.reply(message, recorded=self.stop is not None)
+            answer = self.assistant.reply(message, recorded=self.stop is not None, cancel=self.cancel)
+            if self.cancel.is_set():
+                return
             self.signals.message.emit(NAME, answer)
             if self.voice:
                 self.signals.status.emit("Speaking")
-                speak(answer)
+                speak(answer, cancel=self.cancel)
+        except OperationCancelled:
+            pass
         except AssistantError as error:
             self.signals.message.emit("System", str(error))
         except Exception:
@@ -94,7 +105,7 @@ class Window(QMainWindow):
         self.assistant = assistant
         self.job = None
         self.listener = None
-        self.close_after_listening = False
+        self.closing = False
         self.last_heard = ""
         self.preview_decoder = None
         if assistant.whisper is not None:
@@ -264,6 +275,8 @@ class Window(QMainWindow):
             bar.setValue(round(usage))
 
     def add_message(self, sender, text):
+        if self.closing:
+            return
         colors = {"You": "#a4e1e0", NAME: "#c7b8ff", "System": "#ffc999"}
         safe_text = escape(text).replace("\n", "<br>")
         self.transcript.append(
@@ -282,10 +295,12 @@ class Window(QMainWindow):
             scroll.setValue(scroll.maximum())
 
     def show_interim(self, take, text):
-        if take.active:
+        if not self.closing and take.active:
             self.show_voice_text("Hearing you", text)
 
     def add_voice_transcript(self, text):
+        if self.closing:
+            return
         self.last_heard = text
         self.show_voice_text("Last heard", text)
         self.add_message("You", text)
@@ -336,6 +351,8 @@ class Window(QMainWindow):
             button.setEnabled(not busy)
 
     def set_status(self, status):
+        if self.closing:
+            return
         if status in ("Recording", "Listening for command") and self.preview_decoder is not None:
             self.show_voice_text("Hearing you", "")
         elif status in ("Ready", "Waiting for wake phrase", "Stopping listener"):
@@ -355,6 +372,9 @@ class Window(QMainWindow):
 
     def finish_job(self):
         self.job = None
+        if self.closing:
+            self.close()
+            return
         self.set_busy(False)
         self.set_status("Ready")
         self.start_listening()
@@ -404,23 +424,23 @@ class Window(QMainWindow):
 
     def finish_listening(self):
         self.listener = None
-        if self.close_after_listening:
+        if self.closing and self.job is None:
             self.close()
         elif self.job is None:
             self.set_status("Ready")
             self.start_listening()
 
     def closeEvent(self, event):
-        if self.job is not None:
-            if self.job.stop is not None:
-                self.job.stop.set()
-            event.ignore()
-            self.statusBar().showMessage("Wait for the current request to finish before closing.", 4000)
-            return
-        if self.listener is not None:
-            self.close_after_listening = True
+        if self.job is not None or self.listener is not None:
+            self.closing = True
             self.hands_free.setChecked(False)
-            self.listener.stop.set()
+            if self.listener is not None:
+                self.listener.stop.set()
+            if self.job is not None:
+                self.job.cancel.set()
+                if self.job.stop is not None:
+                    self.job.stop.set()
+            self.status.setText("Closing…")
             self.centralWidget().setEnabled(False)
             event.ignore()
             return

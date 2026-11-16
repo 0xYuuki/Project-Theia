@@ -6,7 +6,7 @@ from openai import APIError, OpenAI, RateLimitError
 
 from theia import NAME
 from theia.commands import local_reply
-from theia.errors import AssistantError
+from theia.errors import AssistantError, OperationCancelled
 from theia.ollama import DEFAULT_MODEL, OllamaChat
 from theia.whisper import WhisperTranscriber
 
@@ -74,7 +74,9 @@ class Assistant:
             return "Set OPENAI_API_KEY in .env and restart to enable OpenAI transcription."
         return ""
 
-    def reply(self, message, *, recorded=False):
+    def reply(self, message, *, recorded=False, cancel=None):
+        if cancel is not None and cancel.is_set():
+            raise OperationCancelled
         response = local_reply(message)
         if response is not None:
             return response
@@ -88,6 +90,8 @@ class Assistant:
             answer = self.openai_reply(messages)
         else:
             raise AssistantError("Set THEIA_CHAT_BACKEND to ollama or openai in .env and restart Theia to enable AI chat.")
+        if cancel is not None and cancel.is_set():
+            raise OperationCancelled
         self.history = [*messages, {"role": "assistant", "content": answer}][-12:]
         return answer
 
@@ -108,9 +112,9 @@ class Assistant:
             raise AssistantError("The AI returned an empty reply.")
         return answer
 
-    def transcribe(self, wav):
+    def transcribe(self, wav, *, cancel=None):
         if self.whisper is not None:
-            return self.whisper.transcribe(wav)
+            return self.whisper.transcribe(wav, cancel=cancel)
         if reason := self.voice_unavailable_reason:
             raise AssistantError(reason)
         try:

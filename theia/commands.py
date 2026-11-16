@@ -3,6 +3,7 @@ import re
 import shutil
 import subprocess
 from datetime import datetime
+from difflib import get_close_matches
 from pathlib import Path
 
 import psutil
@@ -52,13 +53,14 @@ def launch(name):
     return f"{name.capitalize()} is unavailable. Install an approved desktop app and try again."
 
 
-def normalize_command(message):
-    command = " ".join(message.casefold().split())
-    command = re.sub(r"^(?:(?:hello|hey|hi)[, ]+)?(?:theia|thea|jarvis)(?: *[,.!:] *| +)", "", command)
+def normalize_command(message, *, preserve_case=False):
+    command = " ".join((message if preserve_case else message.casefold()).split())
+    command = re.sub(r"^(?:(?:hello|hey|hi)[, ]+)?(?:theia|thea|jarvis)(?: *[,.!:] *| +)", "", command,
+                     flags=re.IGNORECASE)
     return command.rstrip(".!? ")
 
 
-def local_reply(message, launcher=launch, *, preferences=None):
+def local_reply(message, launcher=launch, *, preferences=None, recorded=False):
     command = normalize_command(message)
     if preferences is not None:
         if command in {"what time format are you using", "what time format do you use"}:
@@ -67,13 +69,34 @@ def local_reply(message, launcher=launch, *, preferences=None):
             time_format = 12 if match[1] in ("12", "twelve") else 24
             preferences.set_time_format(time_format)
             return f"I'll use {time_format}-hour time from now on."
+        if re.fullmatch(r"(?:please )?(?:remember that i prefer|use|give me) short(?:er)? (?:answers|replies)", command):
+            preferences.set("answer_length", "short")
+            return "I'll keep my answers short."
+        if command in {"use default answer length", "forget my answer length preference"}:
+            preferences.set("answer_length", "default")
+            return "I'll use my usual answer length."
+        if match := re.fullmatch(r"(?:please )?speak (?:a little )?(slower|faster)", command):
+            speed = match[1]
+            preferences.set("speaking_speed", speed)
+            return f"I'll speak {speed}."
+        if command in {"use normal speaking speed", "speak at your normal speed", "forget my speaking speed preference"}:
+            preferences.set("speaking_speed", "normal")
+            return "I'll speak at my usual speed."
     if command in {"help", "commands"}:
         return (
             "Try check CPU, check RAM, check disk, what time is it, use 12-hour time, "
-            "or open firefox, files, terminal, or calculator."
+            "set a timer for 10 minutes, or open firefox, files, terminal, or calculator."
         )
     if command.startswith("open "):
-        return launcher(command[5:].strip())
+        app = command[5:].strip()
+        if recorded and app not in APPS and re.fullmatch(r"[a-z]+(?: [a-z]+)?", app):
+            candidates = get_close_matches(app.replace(" ", ""), APPS, cutoff=0.65)
+            if len(candidates) == 1:
+                return f"Did you mean {candidates[0]}? Say ‘open {candidates[0]}’ to confirm."
+            if candidates:
+                choices = ", ".join(f"‘open {name}’" for name in candidates)
+                return f"Which app did you mean? Say {choices}."
+        return launcher(app)
     command = re.sub(r"\bc[. ]+p[. ]+u\b\.?", "cpu", command)
     command = re.sub(r"\br[. ]+a[. ]+m\b\.?", "ram", command)
     command = re.sub(r"^(?:show(?: me)?|what(?:['’]s| is)) ", "check ", command)

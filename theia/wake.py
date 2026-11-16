@@ -8,7 +8,6 @@ from theia.audio import listen_for_speech, speak
 from theia.commands import normalize_command
 from theia.errors import AssistantError, NoSpeechDetected, OperationCancelled, TranscriptionTimeout
 from theia.live_transcript import PreviewTake
-from theia.tone import tone_for_message
 
 
 WAKE_PROMPT = "Hey Theia. Hello Theia. Hi Theia."
@@ -42,7 +41,17 @@ class WakeJob(QRunnable):
         self.voice = voice
         self.preview_decoder = preview_decoder
         self.stop = Event()
+        self.playback = None
         self.signals = WakeSignals()
+
+    def abort(self):
+        self.stop.set()
+        self.stop_speaking()
+
+    def stop_speaking(self):
+        playback = self.playback
+        if playback is not None:
+            playback.set()
 
     def run(self):
         try:
@@ -83,7 +92,7 @@ class WakeJob(QRunnable):
                     self.signals.message.emit("System", str(error))
                     return
                 self.respond(
-                    answer.text, speech=answer.speech if spoken else "", length_scale=tone_for_message(command).length_scale,
+                    answer.text, speech=answer.speech if spoken else "", message=command,
                 )
 
             transcript = self.hear(FOLLOW_UP_STATUS, start_timeout=12)
@@ -115,15 +124,20 @@ class WakeJob(QRunnable):
             self.signals.message.emit("System", str(error))
             return ""
 
-    def respond(self, text, *, speech=None, length_scale=None):
+    def respond(self, text, *, speech=None, message=""):
         if self.stop.is_set():
             return
         self.signals.message.emit(NAME, text)
         spoken_text = text if speech is None else speech
         if self.voice and spoken_text:
+            self.playback = Event()
+            if self.stop.is_set():
+                return
             self.signals.status.emit("Speaking")
             try:
-                speak(spoken_text, cancel=self.stop, length_scale=length_scale)
+                speak(spoken_text, cancel=self.playback, length_scale=self.assistant.speaking_pace(message))
+            except OperationCancelled:
+                pass
             except AssistantError as error:
                 self.signals.message.emit("System", str(error))
             self.stop.wait(0.15)

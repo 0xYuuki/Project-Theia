@@ -8,10 +8,12 @@ from dotenv import dotenv_values
 from openai import APIError, OpenAI, RateLimitError
 
 from theia import NAME
-from theia.commands import local_reply
+from theia.commands import local_reply, normalize_command
+from theia.documents import Document
 from theia.errors import AssistantError, OperationCancelled
 from theia.ollama import DEFAULT_MODEL, OllamaChat
 from theia.preferences import Preferences
+from theia.reminders import Reminders, reminder_reply
 from theia.tone import tone_for_message
 from theia.whisper import WhisperTranscriber
 
@@ -55,12 +57,15 @@ def voice_reply(content):
     if not isinstance(display, str) or not display.strip():
         raise AssistantError(error_message)
 
-    summary = fields.get("speech")
+    return Reply(display.strip(), short_speech(fields.get("speech")))
+
+
+def short_speech(summary):
     words = summary.split() if isinstance(summary, str) else []
     speech = " ".join(words)
     if not words or len(words) > 35 or len(re.split(r"(?<=[.!?])\s+", speech)) > 2:
         speech = SPEECH_FALLBACK
-    return Reply(display.strip(), speech)
+    return speech
 
 
 def api_error_message(error, action):
@@ -89,6 +94,9 @@ class Assistant:
         self.transcription_model = settings.get("OPENAI_TRANSCRIPTION_MODEL") or "gpt-4o-mini-transcribe"
         self.history = []
         self.preferences = preferences if preferences is not None else Preferences()
+        self.reminders = Reminders(self.preferences.path.with_name("reminders.sqlite3"))
+        self.document = None
+        self.document_context = None
         self.chat_backend = (settings.get("THEIA_CHAT_BACKEND") or "off").strip().casefold()
         self.ollama = None
         if self.chat_backend == "ollama":
@@ -114,6 +122,8 @@ class Assistant:
     def voice_unavailable_reason(self):
         if self.whisper is not None:
             return self.whisper.unavailable_reason
+        if self.document is not None:
+            return "Switch to local Whisper transcription to ask about an attached file by voice."
         if self.voice_backend != "openai":
             return f"Set THEIA_VOICE_BACKEND to whisper or openai in .env and restart {NAME}."
         if self.client is None:
@@ -123,17 +133,51 @@ class Assistant:
     def reply(self, message, *, recorded=False, cancel=None):
         return self.prepare_reply(message, recorded=recorded, cancel=cancel).text
 
+    def set_document(self, path, *, cancel=None):
+        if path is not None and self.ollama is None:
+            raise AssistantError("Enable local Ollama chat to ask about files.")
+        document = Document.load(path, cancel=cancel) if path is not None else None
+        if cancel is not None and cancel.is_set():
+            raise OperationCancelled
+        self.document = document
+        self.document_context = None
+        return document.name if document is not None else ""
+
+    def speaking_pace(self, message):
+        pace = tone_for_message(message).length_scale
+        speed = self.preferences.get("speaking_speed")
+        if speed == "normal":
+            return pace
+        return (pace or 1.0) * {"slower": 1.15, "faster": 0.9}[speed]
+
     def prepare_reply(self, message, *, recorded=False, cancel=None, spoken=False):
         if cancel is not None and cancel.is_set():
             raise OperationCancelled
-        response = local_reply(message, preferences=self.preferences)
+        response = local_reply(message, preferences=self.preferences, recorded=recorded)
+        if response is None:
+            response = reminder_reply(
+                normalize_command(message, preserve_case=True), self.reminders, self.preferences.time_format,
+            )
         if response is not None:
             return Reply(response, response)
+        if self.document is not None:
+            if self.ollama is None:
+                raise AssistantError("Enable local Ollama chat to ask about files.")
+            answer, evidence = self.document.answer(
+                self.ollama, message, self.document_context, short=self.preferences.get("answer_length") == "short",
+            )
+            if cancel is not None and cancel.is_set():
+                raise OperationCancelled
+            if evidence:
+                self.document_context = (message[:500], answer[:600])
+            details = "\n\n".join(f"{part.label}\n{part.text}" for part in evidence)
+            return Reply(f"{answer}\n\nSources\n{details}" if evidence else answer, short_speech(answer))
         prompt = {"role": "user", "content": message}
         messages = [*self.history, prompt]
         schema = VOICE_SCHEMA if spoken and self.ollama is not None else None
         output_format = VOICE_INSTRUCTIONS if schema is not None else "Answer in plain text."
-        instructions = f"{CHAT_INSTRUCTIONS} {output_format} {tone_for_message(message).instruction}"
+        length = " Keep the answer to a few short sentences." if self.preferences.get("answer_length") == "short" else ""
+        instructions = f"{CHAT_INSTRUCTIONS} {output_format}{length} {tone_for_message(message).instruction}"
         if self.ollama is not None:
             answer = self.ollama.reply([{"role": "system", "content": instructions}, *messages], schema=schema)
         elif recorded:

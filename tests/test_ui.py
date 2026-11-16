@@ -2,6 +2,8 @@ import os
 import queue
 import time
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from threading import Event
 from types import SimpleNamespace
 from unittest.mock import ANY, Mock, call, patch
@@ -10,11 +12,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QPushButton
 
 from theia.assistant import Assistant, Reply
-from theia.errors import AssistantError, TranscriptionTimeout
-from theia.tone import BRIGHT
+from theia.dialogs import SettingsDialog
+from theia.errors import AssistantError, OperationCancelled, TranscriptionTimeout
+from theia.preferences import Preferences
+from theia.tone import BRIGHT, tone_for_message
 from theia.ui import VOICE_PREVIEW, Window, style_application
 
 
@@ -28,6 +32,7 @@ class WindowTests(unittest.TestCase):
         self.assistant = SimpleNamespace(
             chat_status="Local commands",
             prepare_reply=Mock(return_value=Reply("<b>CPU usage</b>", "Here is your CPU usage.")),
+            reminders=SimpleNamespace(take_due=lambda: []), speaking_pace=lambda text: tone_for_message(text).length_scale,
             transcribe=Mock(return_value="check RAM"), whisper=None,
             voice_backend="whisper", voice_unavailable_reason="Set up whisper.cpp.",
         )
@@ -95,6 +100,96 @@ class WindowTests(unittest.TestCase):
             self.wait_for_reply(window)
             speak.assert_called_once_with("Here is your CPU usage.", cancel=ANY, length_scale=BRIGHT.length_scale)
 
+    def test_correcting_final_transcript_keeps_original_and_uses_voice_routing(self):
+        window = self.open_window()
+        window.add_voice_transcript("Open fire fox.")
+        window.edit_heard.click()
+        self.assertEqual(window.entry.text(), "Open fire fox.")
+        self.assistant.prepare_reply.assert_not_called()
+        window.entry.setText("Open Firefox.")
+        window.send.click()
+        self.wait_for_reply(window)
+        self.assistant.prepare_reply.assert_called_once_with("Open Firefox.", recorded=True, cancel=ANY, spoken=False)
+        self.assertIn("Open fire fox.", window.transcript.toPlainText())
+        self.assertEqual(window.heard_text.toPlainText(), "Open fire fox.")
+
+    def test_stop_shortcut_cancels_manual_playback_without_losing_the_reply(self):
+        window = self.open_window()
+        window.voice.setChecked(True)
+        speaking = Event()
+
+        def play(text, *, cancel, length_scale):
+            speaking.set()
+            if cancel.wait(3):
+                raise OperationCancelled
+            raise AssistantError("Playback wasn't cancelled.")
+
+        with patch("theia.ui.speak", side_effect=play):
+            window.send_message("check memory")
+            self.wait_until(lambda: speaking.is_set() and window.stop_voice.isEnabled())
+            QTest.keyClick(window.entry, Qt.Key.Key_S, Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)
+            self.wait_for_reply(window)
+        self.assertIn("CPU usage", window.transcript.toPlainText())
+        self.assertNotIn("wasn't cancelled", window.transcript.toPlainText())
+        self.assertEqual(window.status.text(), "Ready")
+
+    def test_app_presents_overdue_reminder_and_supports_cancelling_pending_items(self):
+        directory = TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        prefs = Preferences(Path(directory.name) / "preferences.json")
+        self.assistant = Assistant(preferences=prefs)
+        reminder = "Check the oven"
+        self.assistant.reminders.add(time.time() - 10, reminder)
+        self.assistant.reminders.add(time.time() + 3_600, "Next timer")
+        with patch("theia.ui.send_notification") as notify:
+            window = self.open_window()
+            self.wait_until(lambda: notify.called)
+            notify.assert_called_once_with(reminder)
+            window.check_reminders()
+        self.assertEqual(window.transcript.toPlainText().count(reminder), 1)
+        window.show_reminders()
+        dialog = window.reminders_dialog
+        self.addCleanup(dialog.accept)
+        self.assertEqual(dialog.items.count(), 1)
+        dialog.items.setCurrentRow(0)
+        dialog.cancel_item.click()
+        self.assertEqual(dialog.items.count(), 0)
+        self.assertEqual(self.assistant.reminders.pending(), [])
+
+    def test_attachment_is_loaded_in_the_worker_and_removed_from_the_window(self):
+        directory = TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        path = root / "schedule.txt"
+        path.write_text("Registration is due June 18.", encoding="utf-8")
+        self.assistant = Assistant(preferences=Preferences(root / "preferences.json"))
+        self.assistant.ollama = Mock()
+        window = self.open_window()
+        window.change_attachment(str(path))
+        self.wait_for_reply(window)
+        self.assertEqual(window.file_label.text(), "schedule.txt")
+        self.assertIsNotNone(self.assistant.document)
+        window.remove_file.click()
+        self.wait_for_reply(window)
+        self.assertFalse(window.remove_file.isVisible())
+        self.assertIsNone(self.assistant.document)
+
+    def test_settings_view_changes_and_resets_each_saved_value(self):
+        directory = TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        prefs = Preferences(Path(directory.name) / "preferences.json")
+        window = self.open_window()
+        dialog = SettingsDialog(prefs, window)
+        self.addCleanup(dialog.deleteLater)
+        expected = {"time_format": 12, "answer_length": "short", "speaking_speed": "slower"}
+        for name, value in expected.items():
+            field = dialog.fields[name]
+            field.activated.emit(field.findData(value))
+            self.assertEqual(prefs.get(name), value)
+        for button in dialog.findChildren(QPushButton):
+            if button.text() == "Reset":
+                button.click()
+        self.assertEqual([prefs.get(name) for name in expected], [24, "default", "normal"])
     def test_live_preview_displays_draft_and_dispatches_final_transcript_once(self):
         self.assistant.voice_unavailable_reason = ""
         self.assistant.whisper = SimpleNamespace(transcribe=Mock(return_value="check"))
@@ -175,7 +270,7 @@ class WindowTests(unittest.TestCase):
         with patch("theia.ui.record") as record, patch("theia.ui.speak") as speak:
             window.preview.click()
             self.wait_for_reply(window)
-            speak.assert_called_once_with(VOICE_PREVIEW, cancel=ANY)
+            speak.assert_called_once_with(VOICE_PREVIEW, cancel=ANY, length_scale=None)
             record.assert_not_called()
         self.assistant.prepare_reply.assert_not_called()
         self.assertTrue(window.preview.isEnabled())
@@ -196,7 +291,7 @@ class WindowTests(unittest.TestCase):
         ]
         audio = queue.Queue()
         playback_started = Event()
-        playback_finished = Event()
+        playback_cancelled = Event()
 
         def listen(stop, *, start_timeout=None, snapshot=None):
             while not stop.is_set():
@@ -206,14 +301,15 @@ class WindowTests(unittest.TestCase):
                     continue
             return None
 
-        def play(text, **kwargs):
+        def play(text, *, cancel, length_scale):
             if text == "Memory summary":
                 playback_started.set()
-                playback_finished.wait(3)
+                if cancel.wait(3):
+                    playback_cancelled.set()
+                    raise OperationCancelled
 
         window = self.open_window()
         self.addCleanup(window.hands_free.setChecked, False)
-        self.addCleanup(playback_finished.set)
         self.assertFalse(window.hands_free.isChecked())
         with (
             patch("theia.wake.listen_for_speech", side_effect=listen) as capture,
@@ -229,9 +325,10 @@ class WindowTests(unittest.TestCase):
             self.assertEqual(capture.call_count, 5)
             self.assertEqual(capture.call_args.kwargs["start_timeout"], 12)
             self.wait_until(lambda: window.status.text() == "Speaking")
-            playback_finished.set()
+            window.stop_voice.click()
 
             self.wait_until(lambda: window.status.text() == "Listening for follow-up")
+            self.assertTrue(playback_cancelled.is_set())
             self.assertEqual(window.heard_text.toPlainText(), "Check memory.")
             for transcript in ("What time is it?", "That’s all.", "Ignore after ending.", "Hi Theia, check CPU."):
                 audio.put(transcript.encode())

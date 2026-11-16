@@ -21,6 +21,8 @@ If the local Whisper model is installed, start Theia and click **Record (5 s)**.
 
 Watch **Hearing you** in the Voice panel for live text as you speak. The text updates in short bursts and may change as Whisper hears more. **Last heard** shows the final transcript that Theia used. Hands-free previews appear for recognized wake phrases and their follow-up commands. OpenAI recording mode shows the final transcript after recording.
 
+Click **Edit and resend** if Theia mishears you. Fix the transcript in the message box and click **Send**. If Theia suggests an app name, repeat the exact command she gives you to open it.
+
 Say or type **“Use 12-hour time”** to get answers like “4:35 PM” when you ask for the time. **“Use 24-hour time”** switches back. Ask **“What time format are you using?”** to check the saved preference. Theia remembers it after restart in `~/.config/theia/preferences.json`, or in `$XDG_CONFIG_HOME/theia/preferences.json` if that variable is set.
 
 ### Listen hands-free
@@ -28,6 +30,8 @@ Say or type **“Use 12-hour time”** to get answers like “4:35 PM” when yo
 Turn on **Hands-free listening** in the **Voice** panel. Say “Hey Theia, check memory,” or say “Hello Theia” or “Hi Theia” on its own, then wait for “I'm listening.” When you see **Listening for follow-up**, you have 12 seconds to start speaking. You can ask another question after each reply without repeating the wake phrase. Say “That's all,” “Goodbye,” or “End conversation” to go back to waiting for a wake phrase, or let the 12 seconds pass in silence. The **Record** button is for one request at a time.
 
 Hands-free listening starts off each time you open the app. While enabled, Theia uses the default microphone and checks speech for a wake phrase on your device. Audio stays in memory. Theia pauses the microphone while processing speech and playing replies. Turn off **Hands-free listening** or close the app to stop. You can turn **Speak replies** off if you only want on-screen responses.
+
+Use **Stop speaking** or **Ctrl+Shift+S** while Theia is talking. The answer stays in chat, and hands-free listening resumes after playback stops.
 
 If you're updating an existing setup, run `.venv/bin/python -m pip install -r requirements.txt` once to install the speech detector, then restart Theia.
 
@@ -70,6 +74,8 @@ In the **Voice** panel, click **Preview voice** to hear the offline English voic
 
 Theia uses a warm chat tone. Clear statements like “I'm excited” or “I feel frustrated” also change her wording and slightly adjust the speaking pace.
 
+Open **Settings** to view, change, or reset the saved time format, answer length, and speaking speed. You can also say “Remember that I prefer short answers,” “Speak a little slower,” or “Use normal speaking speed.”
+
 On a fresh install, download Piper's [Kristin voice model](https://github.com/OHF-Voice/piper1-gpl/blob/main/docs/COMMERCIAL_USE.md) once from the project directory.
 
 ```bash
@@ -96,6 +102,18 @@ THEIA_VOICE_BACKEND=whisper
 ```
 
 With **Local AI** displayed, type a question or speak one using **Record** or a wake phrase. Theia tries desktop commands first. The local model handles other questions and keeps up to six recent AI exchanges in memory for follow-ups. With **Speak replies** on, Theia gives you a short spoken answer and leaves the full response in the chat. For a smaller model, pull `qwen2.5:1.5b-instruct`, update `THEIA_OLLAMA_MODEL`, and restart Theia.
+
+### Ask questions about a file
+
+Click **Attach file** or drop one PDF, TXT, or Markdown file into the window. Ask a question about it, then use the page or line references in the answer to check the source. **Remove file** returns to regular chat. Theia uses local Ollama for file questions and local Whisper for voice input while a file is attached.
+
+On Fedora, install `poppler-utils` for PDF support with `sudo dnf install poppler-utils`. PDFs need a searchable text layer. Files can be up to 10 MB, 100 PDF pages, and 500,000 extracted characters. Save TXT and Markdown files as UTF-8.
+
+## Timers and reminders
+
+Say or type “Set a timer for 10 minutes,” “Remind me in 20 minutes to check the oven,” or “Remind me at 6 PM to check the oven.” A clock time means the next occurrence in your local time. Open **Reminders** to see or cancel pending items.
+
+Theia posts a chat message when a reminder is due. Install `libnotify` with `sudo dnf install libnotify` to enable Fedora desktop notifications. Pending reminders persist across restarts. Keep Theia running to receive them on time, or see overdue reminders when you reopen it.
 
 ## Enable optional OpenAI chat
 

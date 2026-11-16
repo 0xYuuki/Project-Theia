@@ -23,7 +23,7 @@ TIME_FORMAT_REQUEST = re.compile(
     r"(?: it| (?:(?:my|the) )?time(?: format)?)?(?: in| to)? (?:a )?"
     r"(12|24|twelve|twenty[- ]four)[ \-–‑]*(?:hours?|hrs?|h)"
     r"(?: format| time(?: format)?| clock)?"
-    r"(?: every ?time i ask(?: you)?(?: what time it is)?| from now on| always)?"
+    r"(?: (?:every ?time|whenever) i ask(?: you)?(?: what time it is| for the time)?| from now on| always)?"
 )
 
 
@@ -90,7 +90,7 @@ def local_reply(message, launcher=launch, *, preferences=None):
     if command in {"check disk", "check disk usage", "disk usage"}:
         disk = psutil.disk_usage("/")
         return f"Root disk usage is {disk.percent:g}% ({disk.free / 1024**3:.1f} GiB free)."
-    if command in {"what time is it", "time", "tell me the time"}:
+    if command in {"what time is it", "check time", "time", "tell me the time"}:
         now = datetime.now()
         time_format = preferences.time_format if preferences is not None else DEFAULT_TIME_FORMAT
         if time_format == 12:

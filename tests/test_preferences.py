@@ -41,12 +41,15 @@ class PreferenceTests(unittest.TestCase):
 
     def test_noon_and_midnight_in_12_hour_time(self):
         assistant = self.new_assistant()
-        assistant.reply("Hey Theia. Can you adjust to twelve-hour format every time I ask you?")
+        confirmation = assistant.reply(
+            "Could you change it to twelve-hour format whenever I ask you for the time?", recorded=True,
+        )
+        self.assertIn("use 12-hour time", confirmation)
         with patch("theia.commands.datetime") as clock:
             clock.now.return_value = datetime(2026, 11, 16, 0, 5)
             self.assertEqual(assistant.reply("What time is it?"), "It's 12:05 AM local time.")
             clock.now.return_value = datetime(2026, 11, 16, 12, 5)
-            self.assertEqual(assistant.reply("What time is it?"), "It's 12:05 PM local time.")
+            self.assertEqual(assistant.reply("Hey Theia. What's the time?", recorded=True), "It's 12:05 PM local time.")
 
     def test_incidental_and_negated_requests_do_not_change_preference(self):
         assistant = self.new_assistant()

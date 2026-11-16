@@ -14,13 +14,22 @@ from theia.errors import AssistantError
 VOICE_MODEL = Path(__file__).resolve().parents[1] / ".piper-voices" / "en_US-kristin-medium.onnx"
 
 
-def record(stop, seconds=5):
+def record(stop, seconds=5, *, snapshot=None):
     try:
         import sounddevice as sd
     except (ImportError, OSError) as error:
         raise AssistantError("Microphone support needs PortAudio on Fedora.") from error
 
     frames = queue.SimpleQueue()
+    chunks = []
+    size = 0
+
+    def drain_frames():
+        nonlocal size
+        while not frames.empty():
+            chunk = frames.get_nowait()
+            chunks.append(chunk)
+            size += len(chunk)
 
     def capture(data, frame_count, time_info, status):
         frames.put(bytes(data))
@@ -31,17 +40,16 @@ def record(stop, seconds=5):
         with sd.RawInputStream(samplerate=rate, channels=1, dtype="int16", callback=capture):
             deadline = time.monotonic() + seconds
             while not stop.wait(0.05) and time.monotonic() < deadline:
-                pass
+                drain_frames()
+                if snapshot is not None:
+                    snapshot(chunks, size, rate)
     except (sd.PortAudioError, ValueError) as error:
         raise AssistantError("Could not open a microphone. Check the default input in Fedora Sound settings.") from error
 
-    chunks = []
-    while not frames.empty():
-        chunks.append(frames.get_nowait())
-    pcm = b"".join(chunks)
-    if len(pcm) < 2 * (rate // 5):
+    drain_frames()
+    if size < 2 * (rate // 5):
         raise AssistantError("The recording was too short. Try again.")
-    return encode_wav(pcm, rate)
+    return encode_wav(b"".join(chunks), rate)
 
 
 def encode_wav(pcm, rate):

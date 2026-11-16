@@ -1,6 +1,6 @@
 # Theia for Fedora
 
-Theia is a Python desktop assistant with typed commands, offline push-to-talk, optional OpenAI chat, and a local Piper voice.
+Theia is a Python desktop assistant with typed commands, offline voice input, optional local AI chat, and a local Piper voice.
 
 ## Start the assistant
 
@@ -17,7 +17,9 @@ Try `help`, `check CPU`, `check RAM`, `check disk`, `what time is it`, or `open 
 
 ## Use offline voice commands
 
-If the local Whisper model is installed, start Theia and click **Record (5 s)**. Say “Theia, check memory” or “what time is it.” Click **Stop recording** to finish early. The English base model runs on your CPU. Theia handles Whisper transcripts as local commands and suggests a retry if it can't find a match.
+If the local Whisper model is installed, start Theia and click **Record (5 s)**. Say “Theia, check memory” or “what time is it.” Click **Stop recording** to finish early. Theia recognizes speech on your CPU and suggests a retry if it can't match a local command.
+
+Watch **Hearing you** in the Voice panel for live text as you speak. The text updates in short bursts and may change as Whisper hears more. **Last heard** shows the final transcript that Theia used. Hands-free previews appear for recognized wake phrases and their follow-up commands. OpenAI recording mode shows the final transcript after recording.
 
 ### Listen hands-free
 
@@ -29,7 +31,7 @@ If you're updating an existing setup, run `.venv/bin/python -m pip install -r re
 
 ### Set up Whisper on a fresh Fedora install
 
-Run these commands once from the project directory. They build [whisper.cpp v1.9.5](https://github.com/ggml-org/whisper.cpp/releases/tag/v1.9.5) and download the [English base model](https://github.com/ggml-org/whisper.cpp/blob/master/models/README.md), about 142 MiB.
+Run these commands once from the project directory. They build [whisper.cpp v1.9.5](https://github.com/ggml-org/whisper.cpp/releases/tag/v1.9.5) and download the [English models](https://huggingface.co/ggerganov/whisper.cpp) for final recognition and live previews.
 
 ```bash
 sudo dnf install gcc gcc-c++ cmake ninja-build curl
@@ -40,10 +42,11 @@ tar -xzf .whisper-cpp/source.tar.gz -C .whisper-cpp/source --strip-components=1
 cmake -S .whisper-cpp/source -B .whisper-cpp/build -G Ninja \
   -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_SERVER=OFF
 cmake --build .whisper-cpp/build --target whisper-cli --parallel 4
+bash .whisper-cpp/source/models/download-ggml-model.sh small.en-q5_1 "$PWD/.whisper-cpp/models"
 bash .whisper-cpp/source/models/download-ggml-model.sh base.en "$PWD/.whisper-cpp/models"
 ```
 
-Restart Theia after setup. If you already have a compatible `whisper-cli` and model, set `WHISPER_CLI` and `WHISPER_MODEL_PATH` in `.env`.
+Restart Theia after setup. To upgrade a base-only installation, run the `small.en-q5_1` download command and restart. Theia uses that model for final transcripts and the base model for faster previews when both are installed. If you already have a compatible `whisper-cli` and model, set `WHISPER_CLI` and `WHISPER_MODEL_PATH` in `.env`.
 
 ## Hear Theia's voice
 
@@ -56,11 +59,31 @@ mkdir -p .piper-voices
 .venv/bin/python -m piper.download_voices --data-dir .piper-voices en_US-kristin-medium
 ```
 
+## Enable local AI chat
+
+Install [Ollama for Linux](https://docs.ollama.com/linux). Use [local-only mode](https://docs.ollama.com/faq#how-do-i-disable-ollamas-cloud-features) and keep Ollama bound to `127.0.0.1:11434`. If you start it manually, run `OLLAMA_NO_CLOUD=1 ollama serve` in a separate terminal. If it runs as a service, set `OLLAMA_NO_CLOUD=1` for that service and restart it.
+
+Download the [Qwen3 1.7B model](https://ollama.com/library/qwen3:1.7b) once.
+
+```bash
+ollama pull qwen3:1.7b
+```
+
+Run `cp -n .env.example .env` and `chmod 600 .env`, then set these lines in `.env` and restart Theia.
+
+```dotenv
+THEIA_CHAT_BACKEND=ollama
+THEIA_OLLAMA_MODEL=qwen3:1.7b
+THEIA_VOICE_BACKEND=whisper
+```
+
+With **Local AI** displayed, type a question or speak one using **Record** or a wake phrase. Theia tries desktop commands first. The local model handles other questions and keeps up to six recent AI exchanges in memory for follow-ups. Turn on **Speak replies** to hear the response. For a smaller model, pull `qwen2.5:1.5b-instruct`, update `THEIA_OLLAMA_MODEL`, and restart Theia.
+
 ## Enable optional OpenAI chat
 
 1. Run `cp -n .env.example .env` and `chmod 600 .env`.
-2. Add your key after `OPENAI_API_KEY=` in `.env` and restart Theia. Keep that file private.
-3. Type a question. When you use AI chat, Theia sends the prompt and up to six previous AI turns to OpenAI. Requests may incur charges.
+2. Set `THEIA_CHAT_BACKEND=openai`, add your key after `OPENAI_API_KEY=`, and restart Theia. Keep that file private.
+3. Type a question. When you use OpenAI chat, Theia sends the prompt and up to six previous AI turns to OpenAI. Requests may incur charges.
 
 You can set `THEIA_VOICE_BACKEND=openai` in `.env` to use cloud transcription, which sends the recording to OpenAI. Offline Whisper is the default.
 
@@ -71,6 +94,7 @@ You can set `THEIA_VOICE_BACKEND=openai` in `.env` to use cloud transcription, w
 - `theia/appearance.py` defines the theme and voice animation.
 - `theia/commands.py` handles local system commands and the app allowlist.
 - `theia/assistant.py` handles chat, session context, and voice backend selection.
+- `theia/ollama.py` handles local AI requests.
 - `theia/whisper.py` sends audio to the local Whisper process.
 - `theia/wake.py` detects speech and handles wake phrases on the device.
 - `theia/audio.py` records audio and plays speech generated by Piper.

@@ -23,6 +23,9 @@ QLabel#chatMode {
 QLabel#status { color: #c8bcfa; font-size: 12px; font-weight: 700; }
 QLabel#status[active="true"] { color: #90eddd; }
 QTextBrowser#transcript { border: none; background: transparent; color: #e9e9f5; }
+QPlainTextEdit#heard {
+    background: #101320; border: 1px solid #3a415f; border-radius: 8px; padding: 5px 7px;
+}
 QLineEdit {
     background: #101320; border: 1px solid #3a415f; border-radius: 9px;
     min-height: 21px; padding: 9px 12px; selection-background-color: #6955b7;
@@ -83,7 +86,7 @@ class BrandMark(QWidget):
 class VoiceOrb(QWidget):
     def __init__(self):
         super().__init__()
-        self.setMinimumHeight(100)
+        self.setMinimumHeight(70)
         self.setMaximumHeight(238)
         self.phase = 0
         self.active = False

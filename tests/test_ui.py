@@ -13,6 +13,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from theia.assistant import Assistant
+from theia.errors import AssistantError
 from theia.ui import VOICE_PREVIEW, Window, style_application
 
 
@@ -24,8 +25,8 @@ class WindowTests(unittest.TestCase):
 
     def setUp(self):
         self.assistant = SimpleNamespace(
-            client=None, reply=Mock(return_value="<b>CPU usage</b>"),
-            transcribe=Mock(return_value="check RAM"),
+            chat_status="Local commands", reply=Mock(return_value="<b>CPU usage</b>"),
+            transcribe=Mock(return_value="check RAM"), whisper=None,
             voice_backend="whisper", voice_unavailable_reason="Set up whisper.cpp.",
         )
 
@@ -33,6 +34,8 @@ class WindowTests(unittest.TestCase):
         window = Window(self.assistant)
         self.addCleanup(window.close)
         self.addCleanup(window.pool.waitForDone)
+        if window.preview_decoder is not None:
+            self.addCleanup(window.preview_decoder.pool.waitForDone)
         window.show()
         return window
 
@@ -41,6 +44,12 @@ class WindowTests(unittest.TestCase):
         while window.job is not None and time.monotonic() < deadline:
             QTest.qWait(10)
         self.assertIsNone(window.job, "Assistant did not return to Ready")
+
+    def wait_until(self, condition):
+        deadline = time.monotonic() + 3
+        while not condition() and time.monotonic() < deadline:
+            QTest.qWait(10)
+        self.assertTrue(condition())
 
     def test_typed_command_returns_to_ready(self):
         window = self.open_window()
@@ -56,6 +65,7 @@ class WindowTests(unittest.TestCase):
 
     def test_stopping_recording_routes_transcription_and_speaks(self):
         self.assistant.voice_unavailable_reason = ""
+        self.assistant.voice_backend = "openai"
         window = self.open_window()
 
         def record_until_stop(stop):
@@ -72,7 +82,65 @@ class WindowTests(unittest.TestCase):
             speak.assert_called_once_with("<b>CPU usage</b>")
         self.assistant.transcribe.assert_called_once_with(b"wav")
         self.assistant.reply.assert_called_once_with("check RAM", recorded=True)
+        self.assertEqual(window.heard_text.toPlainText(), "check RAM")
         self.assertTrue(window.mic.isEnabled())
+
+    def test_live_preview_displays_draft_and_dispatches_final_transcript_once(self):
+        self.assistant.voice_unavailable_reason = ""
+        self.assistant.whisper = SimpleNamespace(transcribe=Mock(return_value="check"))
+        window = self.open_window()
+
+        def record_until_stop(stop, *, snapshot):
+            snapshot([bytes(32000)], 32000, 16000)
+            stop.wait(3)
+            return b"final WAV"
+
+        with patch("theia.ui.record", side_effect=record_until_stop):
+            window.mic.click()
+            self.wait_until(lambda: window.heard_text.toPlainText() == "check")
+            self.assertEqual(window.heard_label.text(), "Hearing you")
+            self.assistant.reply.assert_not_called()
+            self.assertNotIn("check", window.transcript.toPlainText())
+            window.mic.click()
+            self.wait_for_reply(window)
+
+        self.assistant.transcribe.assert_called_once_with(b"final WAV")
+        self.assistant.reply.assert_called_once_with("check RAM", recorded=True)
+        self.assertEqual(window.heard_label.text(), "Last heard")
+        self.assertEqual(window.heard_text.toPlainText(), "check RAM")
+        self.assertEqual(window.transcript.toPlainText().count("check RAM"), 1)
+
+    def test_late_preview_does_not_replace_final_text_or_delay_dispatch(self):
+        self.assistant.voice_unavailable_reason = ""
+        decoding = Event()
+        release = Event()
+
+        def slow_preview(wav, **kwargs):
+            decoding.set()
+            release.wait(3)
+            return "stale partial"
+
+        self.assistant.whisper = SimpleNamespace(transcribe=Mock(side_effect=slow_preview))
+        window = self.open_window()
+        self.addCleanup(release.set)
+
+        def record_until_stop(stop, *, snapshot):
+            snapshot([bytes(32000)], 32000, 16000)
+            snapshot([bytes(64000)], 64000, 16000)
+            stop.wait(3)
+            return b"final WAV"
+
+        with patch("theia.ui.record", side_effect=record_until_stop):
+            window.mic.click()
+            self.wait_until(decoding.is_set)
+            window.mic.click()
+            self.wait_for_reply(window)
+            self.assistant.reply.assert_called_once_with("check RAM", recorded=True)
+            release.set()
+            self.assertTrue(window.preview_decoder.pool.waitForDone(1000))
+            QTest.qWait(10)
+        self.assistant.whisper.transcribe.assert_called_once()
+        self.assertEqual(window.heard_text.toPlainText(), "check RAM")
 
     def test_preview_voice_skips_recording_and_chat(self):
         window = self.open_window()
@@ -88,9 +156,10 @@ class WindowTests(unittest.TestCase):
     def test_hands_free_wakes_answers_and_rearms(self):
         self.assistant.voice_unavailable_reason = ""
         self.assistant.whisper = SimpleNamespace(transcribe=Mock(side_effect=lambda wav, **kw: wav.decode()))
+        self.assistant.reply.side_effect = [AssistantError("Ollama is unavailable."), "Memory", "Time", "CPU"]
         audio = queue.Queue()
 
-        def listen(stop, *, start_timeout=None):
+        def listen(stop, *, start_timeout=None, snapshot=None):
             while not stop.is_set():
                 try:
                     return audio.get(timeout=0.02)
@@ -104,20 +173,22 @@ class WindowTests(unittest.TestCase):
             window.hands_free.setChecked(True)
             self.assertTrue(window.voice.isChecked())
             for transcript in (
-                "Hello there!", "Hey Theia, check memory.", "Hello, Theia!",
+                "Hello there!", "Hey Theia, tell me a story.", "Hey Theia, check memory.", "Hello, Theia!",
                 "What time is it?", "Hi Theia, check CPU.",
             ):
                 audio.put(transcript.encode())
 
             deadline = time.monotonic() + 3
-            while self.assistant.reply.call_count < 3 and time.monotonic() < deadline:
+            while self.assistant.reply.call_count < 4 and time.monotonic() < deadline:
                 QTest.qWait(10)
             self.assertEqual(self.assistant.reply.call_args_list, [
+                call("tell me a story", recorded=True),
                 call("check memory", recorded=True),
                 call("What time is it?", recorded=True),
                 call("check CPU", recorded=True),
             ])
             self.assertIn(call("I'm listening."), speak.call_args_list)
+            self.assertIn("Ollama is unavailable.", window.transcript.toPlainText())
             self.assertNotIn("Hello there!", window.transcript.toPlainText())
 
             window.hands_free.setChecked(False)
@@ -129,29 +200,109 @@ class WindowTests(unittest.TestCase):
 
     def test_close_stops_the_hands_free_microphone(self):
         self.assistant.voice_unavailable_reason = ""
-        self.assistant.whisper = SimpleNamespace(transcribe=Mock())
-        window = self.open_window()
-        capturing = Event()
+        decoding = Event()
+        release = Event()
 
-        def listen(stop, *, start_timeout=None):
-            capturing.set()
+        def transcribe(wav, **kwargs):
+            decoding.set()
+            release.wait(3)
+            return "Hey Theia, late result"
+
+        self.assistant.whisper = SimpleNamespace(transcribe=Mock(side_effect=transcribe))
+        window = self.open_window()
+        self.addCleanup(release.set)
+
+        def listen(stop, *, start_timeout=None, snapshot=None):
+            snapshot([bytes(32000)], 32000, 16000)
             stop.wait(2)
             return None
 
         with patch("theia.wake.listen_for_speech", side_effect=listen):
             window.hands_free.setChecked(True)
-            self.assertTrue(capturing.wait(1))
+            self.wait_until(decoding.is_set)
             window.close()
-            deadline = time.monotonic() + 3
-            while window.isVisible() and time.monotonic() < deadline:
-                QTest.qWait(10)
-            self.assertFalse(window.isVisible())
+            self.wait_until(lambda: not window.isVisible())
             self.assertIsNone(window.listener)
+            release.set()
+            self.assertTrue(window.preview_decoder.pool.waitForDone(1000))
+            QTest.qWait(10)
+            self.assertEqual(window.heard_text.toPlainText(), "")
+            self.assistant.reply.assert_not_called()
+
+    def test_hands_free_filters_background_and_previews_both_command_flows(self):
+        self.assistant.voice_unavailable_reason = ""
+        audio = queue.Queue()
+        drafts = queue.Queue()
+
+        def transcribe(wav, *, timeout=None, prompt="", preview=False):
+            return drafts.get_nowait() if preview else wav.decode()
+
+        def listen(stop, *, start_timeout=None, snapshot):
+            while not stop.is_set():
+                try:
+                    phrase, finished = audio.get(timeout=0.02)
+                    break
+                except queue.Empty:
+                    continue
+            else:
+                return None
+            snapshot([bytes(32000)], 32000, 16000)
+            while not stop.is_set() and not finished.wait(0.02):
+                pass
+            return None if stop.is_set() else phrase.encode()
+
+        self.assistant.whisper = SimpleNamespace(transcribe=Mock(side_effect=transcribe))
+        window = self.open_window()
+        self.addCleanup(window.hands_free.setChecked, False)
+        with patch("theia.wake.listen_for_speech", side_effect=listen), patch("theia.wake.speak"):
+            window.hands_free.setChecked(True)
+
+            background_done = Event()
+            drafts.put("Hello there, this is private.")
+            audio.put(("Hello there, this is private.", background_done))
+            self.wait_until(drafts.empty)
+            self.assertTrue(window.preview_decoder.pool.waitForDone(1000))
+            QTest.qWait(10)
+            self.assertEqual(window.heard_text.toPlainText(), "")
+            background_done.set()
+
+            inline_done = Event()
+            drafts.put("Hey Theia, check")
+            audio.put(("Hey Theia, check memory.", inline_done))
+            self.wait_until(lambda: window.heard_text.toPlainText() == "Hey Theia, check")
+            self.assistant.reply.assert_not_called()
+            inline_done.set()
+            self.wait_until(lambda: window.last_heard == "Hey Theia, check memory.")
+
+            wake_done = Event()
+            drafts.put("Hello Theia.")
+            audio.put(("Hello Theia.", wake_done))
+            self.wait_until(lambda: window.heard_label.text() == "Hearing you"
+                            and window.heard_text.toPlainText() == "Hello Theia.")
+            wake_done.set()
+            self.wait_until(lambda: window.status.text() == "Listening for command")
+
+            follow_up_done = Event()
+            drafts.put("What time")
+            audio.put(("What time is it?", follow_up_done))
+            self.wait_until(lambda: window.heard_text.toPlainText() == "What time")
+            follow_up_done.set()
+            self.wait_until(lambda: window.last_heard == "What time is it?"
+                            and self.assistant.reply.call_count == 2)
+            self.assertEqual(self.assistant.reply.call_args_list, [
+                call("check memory", recorded=True), call("What time is it?", recorded=True),
+            ])
+            self.assertNotIn("private", window.transcript.toPlainText())
+            window.hands_free.setChecked(False)
+            self.wait_until(lambda: window.listener is None)
 
     def test_whisper_recordings_use_offline_commands_even_with_an_api_key(self):
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch("theia.assistant.dotenv_values", return_value={}),
+            patch("theia.assistant.dotenv_values", return_value={
+                "THEIA_CHAT_BACKEND": "openai",
+                "OPENAI_API_KEY": "unused",
+            }),
             patch("theia.whisper.shutil.which", return_value="/path/to/whisper-cli"),
             patch("theia.whisper.Path.is_file", return_value=True),
         ):

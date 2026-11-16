@@ -6,7 +6,7 @@ from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QPalette
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
-    QMainWindow, QProgressBar, QPushButton, QTextBrowser, QVBoxLayout, QWidget,
+    QMainWindow, QPlainTextEdit, QProgressBar, QPushButton, QTextBrowser, QVBoxLayout, QWidget,
 )
 
 from theia import NAME
@@ -15,6 +15,7 @@ from theia.assistant import Assistant
 from theia.audio import record, speak
 from theia.commands import system_usage
 from theia.errors import AssistantError
+from theia.live_transcript import PreviewDecoder, PreviewTake
 from theia.wake import WakeJob
 
 
@@ -24,17 +25,19 @@ VOICE_PREVIEW = "Hi, I'm Theia. I'm ready when you are."
 class JobSignals(QObject):
     status = Signal(str)
     message = Signal(str, str)
+    heard = Signal(str)
     finished = Signal()
 
 
 class Job(QRunnable):
-    def __init__(self, assistant, message, stop, voice, preview=False):
+    def __init__(self, assistant, message, stop, voice, preview=False, preview_decoder=None):
         super().__init__()
         self.assistant = assistant
         self.message = message
         self.stop = stop
         self.voice = voice
         self.preview = preview
+        self.preview_decoder = preview_decoder
         self.signals = JobSignals()
 
     def run(self):
@@ -44,10 +47,10 @@ class Job(QRunnable):
                 return
             message = self.message
             if self.stop is not None:
-                wav = record(self.stop)
+                wav = self.record_voice()
                 self.signals.status.emit("Transcribing")
                 message = self.assistant.transcribe(wav)
-                self.signals.message.emit("You", message)
+                self.signals.heard.emit(message)
             self.signals.status.emit("Working")
             answer = self.assistant.reply(message, recorded=self.stop is not None)
             self.signals.message.emit(NAME, answer)
@@ -60,6 +63,15 @@ class Job(QRunnable):
             self.signals.message.emit("System", "Something went wrong while processing that request.")
         finally:
             self.signals.finished.emit()
+
+    def record_voice(self):
+        if self.preview_decoder is None:
+            return record(self.stop)
+        take = PreviewTake(self.preview_decoder, self.stop)
+        try:
+            return record(self.stop, snapshot=take.offer)
+        finally:
+            take.close()
 
 
 def make_card():
@@ -83,11 +95,16 @@ class Window(QMainWindow):
         self.job = None
         self.listener = None
         self.close_after_listening = False
+        self.last_heard = ""
+        self.preview_decoder = None
+        if assistant.whisper is not None:
+            self.preview_decoder = PreviewDecoder(assistant.whisper.transcribe, self)
+            self.preview_decoder.heard.connect(self.show_interim)
         self.pool = QThreadPool(self)
         self.pool.setMaxThreadCount(1)
         self.setWindowTitle(NAME)
         self.resize(1100, 700)
-        self.setMinimumSize(720, 575)
+        self.setMinimumSize(720, 650)
 
         root = QWidget(objectName="root")
         self.setCentralWidget(root)
@@ -100,8 +117,7 @@ class Window(QMainWindow):
         header.addWidget(BrandMark())
         header.addWidget(QLabel(NAME, objectName="brand"))
         header.addStretch()
-        mode_label = "Cloud chat configured" if assistant.client else "Offline mode"
-        header.addWidget(QLabel(mode_label, objectName="chatMode"))
+        header.addWidget(QLabel(assistant.chat_status, objectName="chatMode"))
         layout.addLayout(header)
 
         body = QHBoxLayout()
@@ -164,6 +180,7 @@ class Window(QMainWindow):
 
     def voice_card(self):
         card, voice = make_card()
+        voice.setSpacing(9)
         heading = QHBoxLayout()
         heading.addWidget(QLabel("Voice", objectName="heading"))
         heading.addStretch()
@@ -181,6 +198,15 @@ class Window(QMainWindow):
         self.voice_caption.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.voice_caption.setToolTip(self.assistant.voice_unavailable_reason)
         voice.addWidget(self.voice_caption)
+
+        self.heard_label = QLabel("Last heard", objectName="muted")
+        voice.addWidget(self.heard_label)
+        self.heard_text = QPlainTextEdit(objectName="heard")
+        self.heard_text.setReadOnly(True)
+        self.heard_text.setAccessibleName("Voice transcript")
+        self.heard_text.setPlaceholderText("Your speech will appear here.")
+        self.heard_text.setFixedHeight(58)
+        voice.addWidget(self.heard_text)
 
         self.mic = QPushButton("Record (5 s)", objectName="record")
         self.mic.setEnabled(available)
@@ -248,6 +274,22 @@ class Window(QMainWindow):
         scroll = self.transcript.verticalScrollBar()
         scroll.setValue(scroll.maximum())
 
+    def show_voice_text(self, label, text):
+        self.heard_label.setText(label)
+        if self.heard_text.toPlainText() != text:
+            self.heard_text.setPlainText(text)
+            scroll = self.heard_text.verticalScrollBar()
+            scroll.setValue(scroll.maximum())
+
+    def show_interim(self, take, text):
+        if take.active:
+            self.show_voice_text("Hearing you", text)
+
+    def add_voice_transcript(self, text):
+        self.last_heard = text
+        self.show_voice_text("Last heard", text)
+        self.add_message("You", text)
+
     def submit(self):
         message = self.entry.text().strip()
         if message and self.job is None:
@@ -276,8 +318,12 @@ class Window(QMainWindow):
     def start_job(self, message, stop, *, preview=False):
         if self.listener is not None:
             self.listener.stop.set()
-        self.job = Job(self.assistant, message, stop, self.voice.isChecked(), preview=preview)
+        self.job = Job(
+            self.assistant, message, stop, self.voice.isChecked(),
+            preview=preview, preview_decoder=self.preview_decoder,
+        )
         self.job.signals.message.connect(self.add_message)
+        self.job.signals.heard.connect(self.add_voice_transcript)
         self.job.signals.status.connect(self.set_status)
         self.job.signals.finished.connect(self.finish_job)
         self.set_busy(True)
@@ -290,6 +336,12 @@ class Window(QMainWindow):
             button.setEnabled(not busy)
 
     def set_status(self, status):
+        if status in ("Recording", "Listening for command") and self.preview_decoder is not None:
+            self.show_voice_text("Hearing you", "")
+        elif status in ("Ready", "Waiting for wake phrase", "Stopping listener"):
+            self.show_voice_text("Last heard", self.last_heard)
+        elif status == "Transcribing" and self.heard_label.text() == "Hearing you":
+            self.heard_label.setText("Finishing transcript…")
         self.core.active = status != "Ready"
         self.status.setText(status)
         self.status.setProperty("active", status != "Ready")
@@ -324,9 +376,10 @@ class Window(QMainWindow):
     def start_listening(self):
         if not self.hands_free.isChecked() or self.job is not None or self.listener is not None:
             return
-        self.listener = WakeJob(self.assistant, self.voice.isChecked())
+        self.listener = WakeJob(self.assistant, self.voice.isChecked(), self.preview_decoder)
         self.listener.signals.status.connect(self.listener_status)
         self.listener.signals.message.connect(self.listener_message)
+        self.listener.signals.heard.connect(self.listener_heard)
         self.listener.signals.failed.connect(self.listener_failed)
         self.listener.signals.finished.connect(self.finish_listening)
         self.set_status("Waiting for wake phrase")
@@ -339,6 +392,10 @@ class Window(QMainWindow):
     def listener_message(self, sender, text):
         if self.listener is not None and not self.listener.stop.is_set():
             self.add_message(sender, text)
+
+    def listener_heard(self, text):
+        if self.listener is not None and not self.listener.stop.is_set():
+            self.add_voice_transcript(text)
 
     def listener_failed(self, message):
         if self.listener is not None and not self.listener.stop.is_set():

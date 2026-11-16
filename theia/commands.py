@@ -49,16 +49,20 @@ def local_reply(message, launcher=launch):
         return "Try check CPU, check RAM, check disk, what time is it, or open firefox, files, terminal, or calculator."
     if command.startswith("open "):
         return launcher(command[5:].strip())
-    if command in {"check cpu", "cpu usage"}:
+    command = re.sub(r"\bc[. ]+p[. ]+u\b\.?", "cpu", command)
+    command = re.sub(r"\br[. ]+a[. ]+m\b\.?", "ram", command)
+    command = re.sub(r"^(?:show(?: me)?|what(?:['’]s| is)) ", "check ", command)
+    command = re.sub(r"^check (?:my|the|system) ", "check ", command)
+    if command in {"check cpu", "check cpu usage", "cpu usage"}:
         return f"CPU usage is {psutil.cpu_percent(interval=0.2):g}%."
     if command in {
         "check ram", "check ram usage", "ram usage",
         "check memory", "check memory usage", "memory usage",
-        "check from usage",
+        "check from usage", "check our am usage", "how much ram am i using", "how much memory am i using",
     }:
         memory = psutil.virtual_memory()
         return f"RAM usage is {memory.percent:g}% ({memory.used / 1024**3:.1f} GiB used)."
-    if command in {"check disk", "disk usage"}:
+    if command in {"check disk", "check disk usage", "disk usage"}:
         disk = psutil.disk_usage("/")
         return f"Root disk usage is {disk.percent:g}% ({disk.free / 1024**3:.1f} GiB free)."
     if command in {"what time is it", "time", "tell me the time"}:

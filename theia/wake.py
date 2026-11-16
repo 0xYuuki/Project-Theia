@@ -9,6 +9,7 @@ from PySide6.QtCore import QObject, QRunnable, Signal
 from theia import NAME
 from theia.audio import encode_wav, speak
 from theia.errors import AssistantError, NoSpeechDetected
+from theia.live_transcript import PreviewTake
 
 
 WAKE_PROMPT = "Hey Theia. Hello Theia. Hi Theia."
@@ -28,7 +29,7 @@ def wake_command(transcript):
     return transcript[match.end():].strip(" ,.!?:;—-\t\n")
 
 
-def listen_for_speech(stop, *, start_timeout=None):
+def listen_for_speech(stop, *, start_timeout=None, snapshot=None):
     try:
         import sounddevice as sd
         import webrtcvad
@@ -50,12 +51,12 @@ def listen_for_speech(stop, *, start_timeout=None):
             samplerate=rate, channels=1, dtype="int16",
             blocksize=rate * FRAME_MS // 1000, callback=capture,
         ) as stream:
-            return collect_speech(frames, stream, webrtcvad.Vad(2), rate, stop, start_timeout)
+            return collect_speech(frames, stream, webrtcvad.Vad(2), rate, stop, start_timeout, snapshot)
     except (sd.PortAudioError, ValueError) as error:
         raise AssistantError("Couldn't open the microphone. Check Fedora Sound settings.") from error
 
 
-def collect_speech(frames, stream, vad, rate, stop, start_timeout):
+def collect_speech(frames, stream, vad, rate, stop, start_timeout, snapshot=None):
     deadline = None if start_timeout is None else monotonic() + start_timeout
     lead = deque(maxlen=LEAD_FRAMES)
     clip = []
@@ -76,6 +77,8 @@ def collect_speech(frames, stream, vad, rate, stop, start_timeout):
             silence = 0 if voiced else silence + 1
             if silence >= END_SILENCE_FRAMES or len(clip) >= MAX_CLIP_FRAMES:
                 return encode_wav(b"".join(clip), rate)
+            if snapshot is not None and voiced:
+                snapshot(clip, len(clip) * len(frame), rate)
         else:
             lead.append((frame, voiced))
             if voiced and sum(is_voiced for _, is_voiced in lead) >= 5:
@@ -86,16 +89,18 @@ def collect_speech(frames, stream, vad, rate, stop, start_timeout):
 class WakeSignals(QObject):
     status = Signal(str)
     message = Signal(str, str)
+    heard = Signal(str)
     failed = Signal(str)
     finished = Signal()
 
 
 class WakeJob(QRunnable):
-    def __init__(self, assistant, voice):
+    def __init__(self, assistant, voice, preview_decoder):
         super().__init__()
         self.assistant = assistant
         self.transcribe = assistant.whisper.transcribe
         self.voice = voice
+        self.preview_decoder = preview_decoder
         self.stop = Event()
         self.signals = WakeSignals()
 
@@ -113,27 +118,38 @@ class WakeJob(QRunnable):
 
     def listen(self):
         while not self.stop.is_set():
-            transcript = self.hear("Waiting for wake phrase", prompt=WAKE_PROMPT)
+            transcript = self.hear("Waiting for wake phrase", wake_only=True)
             command = wake_command(transcript)
             if command is None or self.stop.is_set():
                 continue
-            self.signals.message.emit("You", transcript)
+            self.signals.heard.emit(transcript)
             if not command:
                 self.respond("I'm listening.")
                 command = self.hear("Listening for command", start_timeout=7)
-                if not command:
+                if not command or self.stop.is_set():
                     continue
-                self.signals.message.emit("You", command)
+                self.signals.heard.emit(command)
 
             if not self.stop.is_set():
                 self.signals.status.emit("Working")
-                self.respond(self.assistant.reply(command, recorded=True))
+                try:
+                    answer = self.assistant.reply(command, recorded=True)
+                except AssistantError as error:
+                    self.signals.message.emit("System", str(error))
+                else:
+                    self.respond(answer)
 
-    def hear(self, status, *, prompt="", start_timeout=None):
+    def hear(self, status, *, wake_only=False, start_timeout=None):
         if self.stop.is_set():
             return ""
         self.signals.status.emit(status)
-        audio = listen_for_speech(self.stop, start_timeout=start_timeout)
+        prompt = WAKE_PROMPT if wake_only else ""
+        accept = (lambda text: wake_command(text) is not None) if wake_only else None
+        take = PreviewTake(self.preview_decoder, self.stop, prompt=prompt, accept=accept)
+        try:
+            audio = listen_for_speech(self.stop, start_timeout=start_timeout, snapshot=take.offer)
+        finally:
+            take.close()
         if audio is None or self.stop.is_set():
             return ""
         self.signals.status.emit("Transcribing")

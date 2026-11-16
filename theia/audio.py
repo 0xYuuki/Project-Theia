@@ -8,6 +8,8 @@ import wave
 from functools import cache
 from pathlib import Path
 
+from PySide6.QtGui import QTextDocument
+
 from theia.errors import AssistantError
 
 
@@ -83,10 +85,18 @@ def synthesize_speech(message):
 
 
 def speak(message):
+    document = QTextDocument()
+    document.setLayoutEnabled(False)
+    features = QTextDocument.MarkdownFeature
+    document.setMarkdown(message, features.MarkdownDialectGitHub | features.MarkdownNoHTML)
+    spoken_text = document.toPlainText().replace("\ufffc", " ").strip()
+    if not spoken_text:
+        return
+
     executable = shutil.which("pw-play")
     if not executable:
         raise AssistantError("Install pipewire-utils to use spoken replies.")
-    audio = synthesize_speech(message)
+    audio = synthesize_speech(spoken_text)
     env = {key: value for key, value in os.environ.items() if key != "OPENAI_API_KEY"}
     try:
         subprocess.run(

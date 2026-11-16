@@ -33,6 +33,27 @@ Hands-free listening starts off each time you open the app. While enabled, Theia
 
 Use **Stop speaking** or **Ctrl+Shift+S** while Theia is talking. The answer stays in chat, and hands-free listening resumes after playback stops.
 
+Theia waits about one second through a pause before ending a take. The Voice panel shows when she is transcribing, thinking, or checking a file. If a file lookup takes a moment, she says “Give me a second to check” when **Speak replies** is enabled.
+
+### Interrupt with “Wait, Theia”
+
+Spoken interruption uses offline Whisper and PipeWire echo cancellation. It is off at startup and only listens for the stop phrase during hands-free reply playback. Set up the named audio devices in your Fedora login session once. Select your usual microphone and speakers first so the virtual devices use that pair. [PipeWire echo cancellation](https://docs.pipewire.org/page_pulse_module_echo_cancel.html)
+
+```bash
+sudo dnf install pipewire-utils pulseaudio-utils
+theia_mic=$(pactl get-default-source)
+theia_speakers=$(pactl get-default-sink)
+pactl load-module module-echo-cancel \
+  source_name=theia_echo_source sink_name=theia_echo_sink \
+  source_master="$theia_mic" sink_master="$theia_speakers"
+pactl set-default-source "$theia_mic"
+pactl set-default-sink "$theia_speakers"
+```
+
+Keep the module number printed by `pactl load-module`. To remove the virtual devices, run `pactl unload-module` followed by that number. The devices also disappear when the PipeWire audio server restarts. If you switch physical devices, reload the module with the new pair.
+
+In Theia, open **Settings → Run interruption sound check**. Stay quiet during the first sample. When the Voice panel says **Sound check · say Wait, Theia**, say “Wait, Theia” over the second sample. After the check passes, turn on **Hands-free listening**. Say “Wait, Theia” to stop a reply, then ask your next question when you see **Listening for follow-up**. Repeat the check after restarting Theia or changing the audio devices. You can turn it off in **Settings**.
+
 If you're updating an existing setup, run `.venv/bin/python -m pip install -r requirements.txt` once to install the speech detector, then restart Theia.
 
 ### Set up Whisper on a fresh Fedora install
@@ -109,9 +130,17 @@ Click **Attach file** or drop one PDF, TXT, or Markdown file into the window. As
 
 On Fedora, install `poppler-utils` for PDF support with `sudo dnf install poppler-utils`. PDFs need a searchable text layer. Files can be up to 10 MB, 100 PDF pages, and 500,000 extracted characters. Save TXT and Markdown files as UTF-8.
 
+### Explain copied text or resume a conversation
+
+Copy plain text from another app, then click **Explain copied text** or say “Explain the text I copied.” Theia sends up to 4,000 characters to local Ollama for that answer. The clipboard is only opened on request, and the text stays out of later model requests and recaps.
+
+Open **Saved conversations → Save recap** to draft a recap of the recent local chat. Edit the title, decisions and open questions before saving. Open the same list to review, rename, delete, or resume a recap. You can also say “Let's continue” followed by its title. Recaps are stored locally and used only with Ollama.
+
 ## Timers and reminders
 
 Say or type “Set a timer for 10 minutes,” “Remind me in 20 minutes to check the oven,” or “Remind me at 6 PM to check the oven.” A clock time means the next occurrence in your local time. Open **Reminders** to see or cancel pending items.
+
+You can start with “Remind me at six.” When Theia asks, say “PM,” then “Check the oven.” Say “Cancel that” to discard the unfinished reminder. A hands-free draft ends when the follow-up window expires. If you use typed chat or **Record**, respond to each follow-up within 60 seconds.
 
 Theia posts a chat message when a reminder is due. Install `libnotify` with `sudo dnf install libnotify` to enable Fedora desktop notifications. Pending reminders persist across restarts. Keep Theia running to receive them on time, or see overdue reminders when you reopen it.
 

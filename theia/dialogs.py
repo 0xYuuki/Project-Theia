@@ -1,6 +1,7 @@
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QFormLayout, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QPushButton, QVBoxLayout,
+    QComboBox, QDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
+    QPlainTextEdit, QPushButton, QVBoxLayout,
 )
 
 from theia.errors import AssistantError
@@ -9,7 +10,7 @@ from theia.reminders import format_due
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, preferences, parent):
+    def __init__(self, preferences, parent, *, interruption=False):
         super().__init__(parent)
         self.setWindowTitle("Theia settings")
         self.setMinimumWidth(360)
@@ -20,6 +21,7 @@ class SettingsDialog(QDialog):
         self.error.setWordWrap(True)
         self.preferences = preferences
         self.fields = {}
+        self.audio_action = None
 
         for name, label, choices in (
             ("time_format", "Time format", {12: "12-hour", 24: "24-hour"}),
@@ -43,9 +45,26 @@ class SettingsDialog(QDialog):
             row.addWidget(reset)
             form.addRow(label, row)
         layout.addWidget(self.error)
+        audio = QLabel("Spoken interruption is on for this session." if interruption else "Spoken interruption is off.")
+        layout.addWidget(audio)
+        check = QPushButton("Run interruption sound check")
+        check.clicked.connect(self.sound_check)
+        layout.addWidget(check)
+        if interruption:
+            disable = QPushButton("Turn off spoken interruption")
+            disable.clicked.connect(self.disable_interruption)
+            layout.addWidget(disable)
         close_button = QPushButton("Done")
         close_button.clicked.connect(self.accept)
         layout.addWidget(close_button, alignment=Qt.AlignmentFlag.AlignRight)
+
+    def sound_check(self):
+        self.audio_action = "check"
+        self.accept()
+
+    def disable_interruption(self):
+        self.audio_action = "disable"
+        self.accept()
 
     def change_value(self, index):
         field = self.sender()
@@ -124,3 +143,119 @@ class RemindersDialog(QDialog):
                 self.status.setText(str(error))
             else:
                 self.refresh()
+
+
+class RecapEditor(QDialog):
+    def __init__(self, store, parent, text, *, title=""):
+        super().__init__(parent)
+        self.setWindowTitle("Review conversation recap")
+        self.setMinimumSize(460, 350)
+        self.store = store
+        self.previous_title = title or None
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        self.title = QLineEdit(title)
+        self.title.setMaxLength(100)
+        form.addRow("Title", self.title)
+        layout.addLayout(form)
+        self.text = QPlainTextEdit(text)
+        self.text.setAccessibleName("Conversation recap")
+        layout.addWidget(self.text, 1)
+        self.error = QLabel()
+        self.error.setWordWrap(True)
+        layout.addWidget(self.error)
+        actions = QHBoxLayout()
+        actions.addStretch()
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        actions.addWidget(cancel)
+        save = QPushButton("Save recap")
+        save.clicked.connect(self.save)
+        actions.addWidget(save)
+        layout.addLayout(actions)
+
+    def save(self):
+        try:
+            self.store.save(self.title.text(), self.text.toPlainText(), previous_title=self.previous_title)
+        except AssistantError as error:
+            self.error.setText(str(error))
+        else:
+            self.accept()
+
+
+class RecapsDialog(QDialog):
+    def __init__(self, store, parent):
+        super().__init__(parent)
+        self.setWindowTitle("Saved conversations")
+        self.setMinimumSize(450, 330)
+        self.store = store
+        self.action = None
+        layout = QVBoxLayout(self)
+        self.items = QListWidget()
+        self.items.setAccessibleName("Saved conversations")
+        self.items.itemDoubleClicked.connect(self.edit)
+        self.items.currentItemChanged.connect(self.selection_changed)
+        layout.addWidget(self.items, 1)
+        self.status = QLabel()
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+        actions = QHBoxLayout()
+        self.selection_buttons = []
+        for label, handler in (
+            ("Save recap", self.new_recap), ("Open or rename", self.edit),
+            ("Resume", self.resume), ("Delete", self.delete),
+        ):
+            button = QPushButton(label)
+            button.clicked.connect(handler)
+            actions.addWidget(button)
+            if handler != self.new_recap:
+                self.selection_buttons.append(button)
+        layout.addLayout(actions)
+        self.refresh()
+
+    def selection_changed(self, current, previous=None):
+        for button in self.selection_buttons:
+            button.setEnabled(current is not None)
+
+    def refresh(self):
+        try:
+            records = self.store.list()
+        except AssistantError as error:
+            self.status.setText(str(error))
+            return
+        self.items.clear()
+        for recap in records:
+            item = QListWidgetItem(recap.title)
+            item.setData(Qt.ItemDataRole.UserRole, recap.text)
+            self.items.addItem(item)
+        self.selection_changed(None)
+        self.status.setText("" if records else "No saved conversations yet.")
+
+    def new_recap(self):
+        self.action = ("draft", "")
+        self.accept()
+
+    def edit(self):
+        if item := self.items.currentItem():
+            dialog = RecapEditor(self.store, self, item.data(Qt.ItemDataRole.UserRole), title=item.text())
+            dialog.exec()
+            dialog.deleteLater()
+            self.refresh()
+
+    def resume(self):
+        if item := self.items.currentItem():
+            self.action = ("resume", item.text())
+            self.accept()
+
+    def delete(self):
+        item = self.items.currentItem()
+        if item is None:
+            return
+        if QMessageBox.question(self, "Delete saved conversation?", "Delete the selected recap?") != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.store.delete(item.text())
+        except AssistantError as error:
+            self.status.setText(str(error))
+        else:
+            self.refresh()

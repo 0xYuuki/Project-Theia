@@ -60,7 +60,7 @@ class WhisperTranscriber:
             return f"Install the Whisper model as described in the README and restart {NAME}."
         return ""
 
-    def transcribe(self, wav, *, prompt="", timeout=45, preview=False, cancel=None):
+    def transcribe(self, wav, *, prompt="", timeout=45, preview=False, cancel=None, command_terms=True):
         if reason := self.unavailable_reason:
             raise AssistantError(reason)
         if is_silent_wav(wav):
@@ -68,8 +68,10 @@ class WhisperTranscriber:
         model = self.preview_model if preview else self.model
         args = [
             "--model", str(model), "--file", "-", "--output-txt", "--output-file", "-", "--no-prints",
-            "--prompt", " ".join(filter(None, (prompt, COMMAND_TERMS))),
         ]
+        vocabulary = " ".join(filter(None, (prompt, COMMAND_TERMS if command_terms else "")))
+        if vocabulary:
+            args.extend(("--prompt", vocabulary))
         env = {key: value for key, value in os.environ.items() if key != "OPENAI_API_KEY"}
         result = None
         if self.gpu_executable and not preview:

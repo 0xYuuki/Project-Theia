@@ -59,10 +59,15 @@ def collect_speech(frames, stream, vad, rate, stop, start_timeout, snapshot=None
     started = time.monotonic()
     deadline = None if start_timeout is None else started + start_timeout
     end = None if duration is None else started + duration
-    end_silence_frames = 30 if end is not None else 35
+    end_silence_frames = 1000 // FRAME_MS
     lead = deque(maxlen=LEAD_FRAMES)
     clip = []
     silence = 0
+
+    def finish():
+        trim = max(0, silence - 10)
+        return encode_wav(b"".join(clip[:-trim] if trim else clip), rate)
+
     while not stop.is_set():
         now = time.monotonic()
         if end is not None and now >= end:
@@ -81,7 +86,7 @@ def collect_speech(frames, stream, vad, rate, stop, start_timeout, snapshot=None
             clip.append(frame)
             silence = 0 if voiced else silence + 1
             if silence >= end_silence_frames or len(clip) >= MAX_CLIP_FRAMES:
-                return encode_wav(b"".join(clip), rate)
+                return finish()
             if snapshot is not None and voiced:
                 snapshot(clip, len(clip) * len(frame), rate)
         else:
@@ -89,7 +94,7 @@ def collect_speech(frames, stream, vad, rate, stop, start_timeout, snapshot=None
             if voiced and sum(is_voiced for _, is_voiced in lead) >= 5:
                 clip = [part for part, _ in lead]
     if end is not None and clip:
-        return encode_wav(b"".join(clip), rate)
+        return finish()
     return None
 
 
@@ -128,26 +133,39 @@ def synthesize_speech(message, *, length_scale=None):
     return audio.getvalue()
 
 
-def speak(message, *, cancel=None, length_scale=None):
-    if cancel is not None and cancel.is_set():
-        raise OperationCancelled
+def render_speech(message, *, length_scale=None):
     document = QTextDocument()
     document.setLayoutEnabled(False)
     features = QTextDocument.MarkdownFeature
     document.setMarkdown(message, features.MarkdownDialectGitHub | features.MarkdownNoHTML)
     spoken_text = document.toPlainText().replace("\ufffc", " ").strip()
-    if not spoken_text:
-        return
+    return synthesize_speech(spoken_text, length_scale=length_scale) if spoken_text else b""
 
+
+def target_args(target):
+    return ["--target", target, "-P", '{"node.dont-fallback":true,"node.dont-reconnect":true}']
+
+
+def play_audio(audio, *, cancel=None, target=None):
     executable = shutil.which("pw-play")
     if not executable:
         raise AssistantError("Install pipewire-utils to use spoken replies.")
-    audio = synthesize_speech(spoken_text, length_scale=length_scale)
+    args = [executable]
+    if target is not None:
+        args.extend(target_args(target))
     env = {key: value for key, value in os.environ.items() if key != "OPENAI_API_KEY"}
     try:
         run_process(
-            [executable, "-"], input=audio, env=env, cancel=cancel,
+            [*args, "-"], input=audio, env=env, cancel=cancel,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=90,
         )
     except (OSError, subprocess.SubprocessError) as error:
         raise AssistantError("Speech playback failed. Check your audio output.") from error
+
+
+def speak(message, *, cancel=None, length_scale=None):
+    if cancel is not None and cancel.is_set():
+        raise OperationCancelled
+    audio = render_speech(message, length_scale=length_scale)
+    if audio:
+        play_audio(audio, cancel=cancel)

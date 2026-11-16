@@ -6,17 +6,19 @@ from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QKeySequence, QPalette
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
-    QMainWindow, QPlainTextEdit, QProgressBar, QPushButton, QTextBrowser, QVBoxLayout, QWidget,
+    QMainWindow, QPlainTextEdit, QProgressBar, QPushButton, QSizePolicy, QTextBrowser, QVBoxLayout, QWidget,
 )
 
 from theia import NAME
 from theia.appearance import STYLE, BrandMark, VoiceOrb
-from theia.assistant import Assistant
+from theia.assistant import COPY_COMMAND, Assistant
 from theia.audio import record, speak
+from theia.clipboard import ClipboardReader
 from theia.commands import system_usage
-from theia.dialogs import RemindersDialog, SettingsDialog
+from theia.dialogs import RecapEditor, RecapsDialog, RemindersDialog, SettingsDialog
 from theia.errors import AssistantError, OperationCancelled
 from theia.live_transcript import PreviewDecoder, PreviewTake
+from theia.pacing import FileFeedback
 from theia.reminders import send_notification
 from theia.wake import FOLLOW_UP_STATUS, WakeJob
 
@@ -29,12 +31,13 @@ class JobSignals(QObject):
     message = Signal(str, str)
     heard = Signal(str)
     attached = Signal(str)
+    recap = Signal(str)
     finished = Signal()
 
 
 class Job(QRunnable):
     def __init__(self, assistant, message, stop, voice, *, preview=False, preview_decoder=None,
-                 corrected=False, attachment=None):
+                 corrected=False, attachment=None, action=None):
         super().__init__()
         self.assistant = assistant
         self.message = message
@@ -46,6 +49,7 @@ class Job(QRunnable):
         self.preview_decoder = preview_decoder
         self.corrected = corrected
         self.attachment = attachment
+        self.action = action
         self.signals = JobSignals()
 
     def abort(self):
@@ -60,6 +64,17 @@ class Job(QRunnable):
     def run(self):
         try:
             if self.cancel.is_set():
+                return
+            if self.action == "draft_recap":
+                text = self.assistant.draft_recap()
+                if not self.cancel.is_set():
+                    self.signals.recap.emit(text)
+                return
+            if self.action == "sound_check":
+                self.assistant.interruption.check(
+                    self.assistant.whisper, self.cancel, self.playback, self.signals.status.emit,
+                )
+                self.signals.message.emit("System", "Sound check passed. Spoken interruption is on for this session.")
                 return
             if self.attachment is not None:
                 name = self.assistant.set_document(self.attachment or None, cancel=self.cancel)
@@ -78,9 +93,11 @@ class Job(QRunnable):
                 if self.cancel.is_set():
                     return
                 self.signals.heard.emit(message)
-            self.signals.status.emit("Working")
+            self.signals.status.emit("Thinking")
+            feedback = FileFeedback(self.signals.status.emit, speak, self.cancel, voice=self.voice)
             answer = self.assistant.prepare_reply(
-                message, recorded=self.stop is not None or self.corrected, cancel=self.cancel, spoken=self.voice,
+                message, recorded=self.stop is not None or self.corrected, cancel=self.cancel,
+                spoken=self.voice, checking=feedback.checking,
             )
             if self.cancel.is_set():
                 return
@@ -132,6 +149,8 @@ class Window(QMainWindow):
         self.correcting = False
         self.reminders_dialog = None
         self.reminders_error = False
+        self.reviewing_recap = False
+        assistant.read_clipboard = ClipboardReader(self).read
         self.preview_decoder = None
         if assistant.whisper is not None:
             self.preview_decoder = PreviewDecoder(assistant.whisper.transcribe, self)
@@ -155,6 +174,9 @@ class Window(QMainWindow):
         header.addWidget(QLabel(NAME, objectName="brand"))
         header.addStretch()
         header.addWidget(QLabel(assistant.chat_status, objectName="chatMode"))
+        saved = QPushButton("Saved conversations")
+        saved.clicked.connect(self.show_recaps)
+        header.addWidget(saved)
         reminders = QPushButton("Reminders")
         reminders.clicked.connect(self.show_reminders)
         header.addWidget(reminders)
@@ -216,12 +238,16 @@ class Window(QMainWindow):
         self.attach_button.clicked.connect(self.choose_attachment)
         self.file_label = QLabel()
         self.file_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.file_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.remove_file = QPushButton("Remove file")
         self.remove_file.clicked.connect(self.detach_file)
         self.remove_file.hide()
         attachment.addWidget(self.attach_button)
         attachment.addWidget(self.file_label, 1)
         attachment.addWidget(self.remove_file)
+        self.explain_copy = QPushButton("Explain copied text")
+        self.explain_copy.clicked.connect(self.explain_copied_text)
+        attachment.addWidget(self.explain_copy)
         chat.addLayout(attachment)
 
         composer = QHBoxLayout()
@@ -341,9 +367,47 @@ class Window(QMainWindow):
             bar.setValue(round(usage))
 
     def show_settings(self):
-        dialog = SettingsDialog(self.assistant.preferences, self)
+        interruption = self.assistant.interruption
+        dialog = SettingsDialog(self.assistant.preferences, self, interruption=interruption.route is not None)
+        dialog.exec()
+        action = dialog.audio_action
+        dialog.deleteLater()
+        if action == "disable":
+            interruption.disable()
+            if self.listener is not None:
+                self.listener.stop_speaking()
+        elif action == "check":
+            if self.job is None:
+                self.start_job("", None, action="sound_check")
+            else:
+                self.add_message("System", "Wait for the current turn to finish before running the sound check.")
+
+    def show_recaps(self):
+        dialog = RecapsDialog(self.assistant.recaps, self)
+        dialog.exec()
+        action = dialog.action
+        dialog.deleteLater()
+        if action is None:
+            return
+        if self.job is not None:
+            self.add_message("System", "Wait for the current turn to finish before switching conversations.")
+        elif action[0] == "draft":
+            self.start_job("", None, action="draft_recap")
+        else:
+            self.send_message(f"Resume {action[1]}")
+
+    def review_recap(self, text):
+        if self.closing:
+            return
+        self.reviewing_recap = True
+        dialog = RecapEditor(self.assistant.recaps, self, text)
         dialog.exec()
         dialog.deleteLater()
+        self.reviewing_recap = False
+        self.start_listening()
+
+    def explain_copied_text(self):
+        self.send_message(COPY_COMMAND.capitalize())
 
     def show_reminders(self):
         if self.reminders_dialog is None:
@@ -481,26 +545,27 @@ class Window(QMainWindow):
                 job.stop_speaking()
             self.stop_voice.setEnabled(False)
 
-    def start_job(self, message, stop, *, preview=False, corrected=False, attachment=None):
+    def start_job(self, message, stop, *, preview=False, corrected=False, attachment=None, action=None):
         if self.listener is not None:
             self.listener.abort()
         self.job = Job(
             self.assistant, message, stop, self.voice.isChecked(),
             preview=preview, preview_decoder=self.preview_decoder,
-            corrected=corrected, attachment=attachment,
+            corrected=corrected, attachment=attachment, action=action,
         )
         self.job.signals.message.connect(self.add_message)
         self.job.signals.heard.connect(self.add_voice_transcript)
         self.job.signals.attached.connect(self.show_attachment)
+        self.job.signals.recap.connect(self.review_recap)
         self.job.signals.status.connect(self.set_status)
         self.job.signals.finished.connect(self.finish_job)
         self.set_busy(True)
-        status = "Recording" if stop is not None else "Working"
+        status = "Recording" if stop is not None else "Thinking"
         self.set_status("Speaking" if preview else "Loading file" if attachment else status)
         self.pool.start(self.job)
 
     def set_busy(self, busy):
-        for button in (self.send, self.preview, self.attach_button, self.remove_file, *self.shortcuts):
+        for button in (self.send, self.preview, self.attach_button, self.remove_file, self.explain_copy, *self.shortcuts):
             button.setEnabled(not busy)
 
     def set_status(self, status):
@@ -522,7 +587,7 @@ class Window(QMainWindow):
         self.status.setText(status)
         self.status.setProperty("active", status != "Ready")
         self.status.style().polish(self.status)
-        self.stop_voice.setEnabled(status == "Speaking")
+        self.stop_voice.setEnabled(status == "Speaking" or status.startswith("Sound check ·"))
         recording = status == "Recording"
         unavailable = self.assistant.voice_unavailable_reason
         self.mic.setEnabled(recording or (idle and not unavailable))
@@ -554,7 +619,8 @@ class Window(QMainWindow):
             self.listener.voice = enabled
 
     def start_listening(self):
-        if not self.hands_free.isChecked() or self.job is not None or self.listener is not None:
+        if (not self.hands_free.isChecked() or self.job is not None or self.listener is not None
+                or self.reviewing_recap or self.closing):
             return
         self.listener = WakeJob(self.assistant, self.voice.isChecked(), self.preview_decoder)
         self.listener.signals.status.connect(self.listener_status)

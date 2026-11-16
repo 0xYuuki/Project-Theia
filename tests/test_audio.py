@@ -64,8 +64,8 @@ class RecordingTests(unittest.TestCase):
         silence = bytes(640)
         voiced = b"\x01\x00" * 320
         frames = queue.Queue()
-        clip = [voiced] * 10 + [silence] * 25 + [voiced] * 10 + [silence] * 30
-        for frame in [*clip, voiced]:
+        clip = [voiced] * 10 + [silence] * 42 + [voiced] * 10 + [silence] * 10
+        for frame in [*clip, *([silence] * 40), voiced]:
             frames.put(frame)
         stream = SimpleNamespace(active=True)
         vad = SimpleNamespace(is_speech=lambda frame, sample_rate: frame == voiced)

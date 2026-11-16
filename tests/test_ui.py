@@ -33,7 +33,7 @@ class WindowTests(unittest.TestCase):
             chat_status="Local commands",
             prepare_reply=Mock(return_value=Reply("<b>CPU usage</b>", "Here is your CPU usage.")),
             reminders=SimpleNamespace(take_due=lambda: []), speaking_pace=lambda text: tone_for_message(text).length_scale,
-            transcribe=Mock(return_value="check RAM"), whisper=None,
+            transcribe=Mock(return_value="check RAM"), whisper=None, interruption=SimpleNamespace(route=None),
             voice_backend="whisper", voice_unavailable_reason="Set up whisper.cpp.",
         )
 
@@ -68,7 +68,7 @@ class WindowTests(unittest.TestCase):
         self.assertIn("Theia", window.transcript.toPlainText())
         self.assertIn("<b>CPU usage</b>", window.transcript.toPlainText())
         self.assertEqual(window.status.text(), "Ready")
-        self.assistant.prepare_reply.assert_called_once_with("check CPU", recorded=False, cancel=ANY, spoken=False)
+        self.assistant.prepare_reply.assert_called_once_with("check CPU", recorded=False, cancel=ANY, spoken=False, checking=ANY)
 
     def test_stopping_recording_routes_transcription_and_speaks(self):
         self.assistant.voice_unavailable_reason = ""
@@ -88,7 +88,7 @@ class WindowTests(unittest.TestCase):
             self.wait_for_reply(window)
             speak.assert_called_once_with("Here is your CPU usage.", cancel=ANY, length_scale=None)
         self.assistant.transcribe.assert_called_once_with(b"wav", cancel=ANY)
-        self.assistant.prepare_reply.assert_called_once_with("check RAM", recorded=True, cancel=ANY, spoken=True)
+        self.assistant.prepare_reply.assert_called_once_with("check RAM", recorded=True, cancel=ANY, spoken=True, checking=ANY)
         self.assertEqual(window.heard_text.toPlainText(), "check RAM")
         self.assertTrue(window.mic.isEnabled())
 
@@ -109,7 +109,7 @@ class WindowTests(unittest.TestCase):
         window.entry.setText("Open Firefox.")
         window.send.click()
         self.wait_for_reply(window)
-        self.assistant.prepare_reply.assert_called_once_with("Open Firefox.", recorded=True, cancel=ANY, spoken=False)
+        self.assistant.prepare_reply.assert_called_once_with("Open Firefox.", recorded=True, cancel=ANY, spoken=False, checking=ANY)
         self.assertIn("Open fire fox.", window.transcript.toPlainText())
         self.assertEqual(window.heard_text.toPlainText(), "Open fire fox.")
 
@@ -190,6 +190,53 @@ class WindowTests(unittest.TestCase):
             if button.text() == "Reset":
                 button.click()
         self.assertEqual([prefs.get(name) for name in expected], [24, "default", "normal"])
+
+    def test_copied_text_button_uses_local_clipboard_and_keeps_history_empty(self):
+        directory = TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.assistant = Assistant(preferences=Preferences(Path(directory.name) / "preferences.json"))
+        self.assistant.ollama = Mock()
+        self.assistant.ollama.reply.return_value = "The file isn't readable by your user account."
+        window = self.open_window()
+        self.app.clipboard().setText("Permission denied: notes.txt")
+        self.addCleanup(self.app.clipboard().clear)
+        window.explain_copy.click()
+        self.wait_for_reply(window)
+        self.assertIn("Permission denied: notes.txt", str(self.assistant.ollama.reply.call_args.args))
+        self.assertIn("user account", window.transcript.toPlainText())
+        self.assertEqual(self.assistant.history, [])
+
+    def test_hands_free_clarifies_reminders_and_discards_draft_on_silence(self):
+        directory = TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.assistant = Assistant(preferences=Preferences(Path(directory.name) / "preferences.json"))
+        self.assistant.ollama = None
+        self.assistant.voice_backend = "whisper"
+        self.assistant.whisper = SimpleNamespace(unavailable_reason="", transcribe=lambda wav, **_: wav.decode())
+        audio = queue.Queue()
+        for transcript in (
+            b"Hey Theia, remind me at six to feed the dog.", None, b"Hey Theia, PM.",
+            b"Hey Theia, remind me at six.", b"PM.", b"Check the oven.", None,
+        ):
+            audio.put(transcript)
+
+        def listen(stop, **kwargs):
+            while not stop.is_set():
+                try:
+                    return audio.get(timeout=0.02)
+                except queue.Empty:
+                    pass
+            return None
+
+        window = self.open_window()
+        self.addCleanup(window.hands_free.setChecked, False)
+        with patch("theia.wake.listen_for_speech", side_effect=listen), patch("theia.wake.speak"):
+            window.hands_free.setChecked(True)
+            self.wait_until(lambda: "I'll remind you to Check the oven" in window.transcript.toPlainText())
+            self.wait_until(lambda: window.status.text() == "Waiting for wake phrase")
+            window.hands_free.setChecked(False)
+            self.wait_until(lambda: window.listener is None)
+        self.assertEqual([item.label for item in self.assistant.reminders.pending()], ["Check the oven"])
     def test_live_preview_displays_draft_and_dispatches_final_transcript_once(self):
         self.assistant.voice_unavailable_reason = ""
         self.assistant.whisper = SimpleNamespace(transcribe=Mock(return_value="check"))
@@ -210,7 +257,7 @@ class WindowTests(unittest.TestCase):
             self.wait_for_reply(window)
 
         self.assistant.transcribe.assert_called_once_with(b"final WAV", cancel=ANY)
-        self.assistant.prepare_reply.assert_called_once_with("check RAM", recorded=True, cancel=ANY, spoken=False)
+        self.assistant.prepare_reply.assert_called_once_with("check RAM", recorded=True, cancel=ANY, spoken=False, checking=ANY)
         self.assertEqual(window.heard_label.text(), "Last heard")
         self.assertEqual(window.heard_text.toPlainText(), "check RAM")
         self.assertEqual(window.transcript.toPlainText().count("check RAM"), 1)
@@ -258,7 +305,7 @@ class WindowTests(unittest.TestCase):
             self.wait_until(decoding.is_set)
             window.mic.click()
             self.wait_for_reply(window)
-            self.assistant.prepare_reply.assert_called_once_with("check RAM", recorded=True, cancel=ANY, spoken=False)
+            self.assistant.prepare_reply.assert_called_once_with("check RAM", recorded=True, cancel=ANY, spoken=False, checking=ANY)
             release.set()
             self.assertTrue(window.preview_decoder.pool.waitForDone(1000))
             QTest.qWait(10)
@@ -338,10 +385,10 @@ class WindowTests(unittest.TestCase):
             self.wait_until(lambda: capture.call_count == 12 and window.status.text() == "Waiting for wake phrase")
             self.assertIsNone(capture.call_args.kwargs["start_timeout"])
             self.assertEqual(self.assistant.prepare_reply.call_args_list, [
-                call("tell me a story", recorded=True, cancel=ANY, spoken=True),
-                call("Check memory.", recorded=True, cancel=ANY, spoken=True),
-                call("What time is it?", recorded=True, cancel=ANY, spoken=True),
-                call("check CPU", recorded=True, cancel=ANY, spoken=True),
+                call("tell me a story", recorded=True, cancel=ANY, spoken=True, checking=ANY, reminder_turn=ANY),
+                call("Check memory.", recorded=True, cancel=ANY, spoken=True, checking=ANY, reminder_turn=ANY),
+                call("What time is it?", recorded=True, cancel=ANY, spoken=True, checking=ANY, reminder_turn=ANY),
+                call("check CPU", recorded=True, cancel=ANY, spoken=True, checking=ANY, reminder_turn=ANY),
             ])
             self.assertEqual([args.args[0] for args in speak.call_args_list], [
                 "I'm listening.", "Memory summary", "Time", "Talk to you later.", "CPU",
@@ -378,7 +425,7 @@ class WindowTests(unittest.TestCase):
             window.hands_free.setChecked(False)
             self.wait_until(lambda: window.listener is None)
             self.assertEqual(capture.call_count, 2)
-            self.assistant.prepare_reply.assert_called_once_with("check memory", recorded=True, cancel=ANY, spoken=True)
+            self.assistant.prepare_reply.assert_called_once_with("check memory", recorded=True, cancel=ANY, spoken=True, checking=ANY, reminder_turn=ANY)
             self.assertNotIn("What time is it?", window.transcript.toPlainText())
 
     def test_close_stops_the_hands_free_microphone(self):
@@ -467,8 +514,8 @@ class WindowTests(unittest.TestCase):
             self.wait_until(lambda: window.last_heard == "What time is it?"
                             and self.assistant.prepare_reply.call_count == 2)
             self.assertEqual(self.assistant.prepare_reply.call_args_list, [
-                call("check memory", recorded=True, cancel=ANY, spoken=True),
-                call("What time is it?", recorded=True, cancel=ANY, spoken=True),
+                call("check memory", recorded=True, cancel=ANY, spoken=True, checking=ANY, reminder_turn=ANY),
+                call("What time is it?", recorded=True, cancel=ANY, spoken=True, checking=ANY, reminder_turn=ANY),
             ])
             self.assertNotIn("private", window.transcript.toPlainText())
             window.hands_free.setChecked(False)

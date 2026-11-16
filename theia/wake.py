@@ -8,6 +8,8 @@ from theia.audio import listen_for_speech, speak
 from theia.commands import normalize_command
 from theia.errors import AssistantError, NoSpeechDetected, OperationCancelled, TranscriptionTimeout
 from theia.live_transcript import PreviewTake
+from theia.pacing import FileFeedback
+from theia.reminders import ReminderTurn
 
 
 WAKE_PROMPT = "Hey Theia. Hello Theia. Hi Theia."
@@ -77,6 +79,7 @@ class WakeJob(QRunnable):
             self.converse(command)
 
     def converse(self, command):
+        reminder_turn = ReminderTurn()
         while not self.stop.is_set():
             if not command:
                 self.respond("I'm listening.")
@@ -84,10 +87,14 @@ class WakeJob(QRunnable):
                 self.respond("Talk to you later.")
                 return
             else:
-                self.signals.status.emit("Working")
+                self.signals.status.emit("Thinking")
                 spoken = self.voice
+                feedback = FileFeedback(self.signals.status.emit, speak, self.stop, voice=spoken)
                 try:
-                    answer = self.assistant.prepare_reply(command, recorded=True, cancel=self.stop, spoken=spoken)
+                    answer = self.assistant.prepare_reply(
+                        command, recorded=True, cancel=self.stop, spoken=spoken,
+                        reminder_turn=reminder_turn, checking=feedback.checking,
+                    )
                 except AssistantError as error:
                     self.signals.message.emit("System", str(error))
                     return
@@ -95,18 +102,18 @@ class WakeJob(QRunnable):
                     answer.text, speech=answer.speech if spoken else "", message=command,
                 )
 
-            transcript = self.hear(FOLLOW_UP_STATUS, start_timeout=12)
+            transcript = self.hear(FOLLOW_UP_STATUS, start_timeout=12, prompt=reminder_turn.transcription_prompt)
             if not transcript or self.stop.is_set():
                 return
             self.signals.heard.emit(transcript)
             addressed = wake_command(transcript)
             command = transcript if addressed is None else addressed
 
-    def hear(self, status, *, wake_only=False, start_timeout=None):
+    def hear(self, status, *, wake_only=False, start_timeout=None, prompt=""):
         if self.stop.is_set():
             return ""
         self.signals.status.emit(status)
-        prompt = WAKE_PROMPT if wake_only else ""
+        prompt = WAKE_PROMPT if wake_only else prompt
         accept = (lambda text: wake_command(text) is not None) if wake_only else None
         take = PreviewTake(self.preview_decoder, self.stop, prompt=prompt, accept=accept)
         try:
@@ -135,7 +142,20 @@ class WakeJob(QRunnable):
                 return
             self.signals.status.emit("Speaking")
             try:
-                speak(spoken_text, cancel=self.playback, length_scale=self.assistant.speaking_pace(message))
+                pace = self.assistant.speaking_pace(message)
+                interruption = self.assistant.interruption
+                route = interruption.route if message else None
+                if route is not None:
+                    try:
+                        interruption.play(spoken_text, self.assistant.whisper, route, self.stop,
+                                          self.playback, length_scale=pace)
+                    except AssistantError as error:
+                        interruption.disable()
+                        self.signals.message.emit("System", f"Spoken interruption turned off. {error}")
+                        if not self.playback.is_set() and not self.stop.is_set():
+                            speak(spoken_text, cancel=self.playback, length_scale=pace)
+                else:
+                    speak(spoken_text, cancel=self.playback, length_scale=pace)
             except OperationCancelled:
                 pass
             except AssistantError as error:

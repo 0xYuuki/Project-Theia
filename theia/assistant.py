@@ -13,6 +13,7 @@ from theia.commands import local_reply, normalize_command
 from theia.documents import Document
 from theia.errors import AssistantError, OperationCancelled
 from theia.interruption import EchoInterruption
+from theia.notes import Notes
 from theia.ollama import DEFAULT_MODEL, OllamaChat
 from theia.preferences import Preferences
 from theia.recaps import MAX_RECAP, Recaps
@@ -101,6 +102,7 @@ class Assistant:
         self.preferences = preferences if preferences is not None else Preferences()
         self.reminders = Reminders(self.preferences.path.with_name("reminders.sqlite3"))
         self.reminder_turn = ReminderTurn()
+        self.notes = Notes(self.preferences.path.with_name("notes.sqlite3"))
         self.recaps = Recaps(self.preferences.path.with_name("recaps.sqlite3"))
         self.active_recap = None
         self.read_clipboard = None
@@ -111,14 +113,19 @@ class Assistant:
         self.ollama = None
         if self.chat_backend == "ollama":
             model = (settings.get("THEIA_OLLAMA_MODEL") or DEFAULT_MODEL).strip() or DEFAULT_MODEL
-            self.ollama = OllamaChat(model)
+            host = settings.get("THEIA_OLLAMA_HOST") or settings.get("OLLAMA_HOST")
+            self.ollama = OllamaChat(model, host=host)
         backend = settings.get("THEIA_VOICE_BACKEND") or settings.get("JARVIS_VOICE_BACKEND") or "whisper"
         self.voice_backend = backend.strip().casefold()
         self.whisper = WhisperTranscriber(settings) if self.voice_backend == "whisper" else None
         key = settings.get("OPENAI_API_KEY")
+        base_url = settings.get("OPENAI_BASE_URL")
         self.client = None
         if key and "openai" in (self.chat_backend, self.voice_backend):
-            self.client = OpenAI(api_key=key, timeout=30, max_retries=0)
+            client_kwargs = {"api_key": key, "timeout": 30, "max_retries": 0}
+            if base_url:
+                client_kwargs["base_url"] = base_url
+            self.client = OpenAI(**client_kwargs)
 
     @property
     def chat_status(self):
@@ -226,6 +233,31 @@ class Assistant:
         response = turn.reply(command, self.reminders, self.preferences.time_format)
         if response is not None:
             return Reply(response, response)
+        lower_command = command.casefold()
+        if lower_command in {"clear chat", "clear conversation", "clear history", "reset conversation", "new chat"}:
+            self.history.clear()
+            self.active_recap = None
+            msg = "Conversation history cleared."
+            return Reply(msg, msg)
+        if lower_command in {"read my notes", "list notes", "show notes", "show my notes", "read notes"}:
+            items = self.notes.list()
+            if not items:
+                msg = "You have no saved notes."
+                return Reply(msg, msg)
+            lines = [f"• {note.text}" for note in items]
+            text = "Your recent notes:\n" + "\n".join(lines)
+            speech = f"You have {len(items)} notes. " + " ".join(f"Note: {n.text}." for n in items[:3])
+            return Reply(text, short_speech(speech))
+        if lower_command in {"clear notes", "clear my notes", "delete notes", "delete all notes"}:
+            count = self.notes.clear()
+            msg = f"Cleared {count} notes." if count else "No notes to clear."
+            return Reply(msg, msg)
+        if note_match := re.fullmatch(r"(?:take a note(?::|\s+to)?|note:?|add note(?::|\s+to)?)\s+(.+)", command, re.IGNORECASE):
+            note_text = note_match[1].strip()
+            if note_text:
+                self.notes.add(note_text)
+                msg = f"I've saved that note: “{note_text}”."
+                return Reply(msg, msg)
         if command.casefold() == COPY_COMMAND:
             return self.explain_clipboard(cancel=cancel, spoken=spoken)
         if match := RESUME.fullmatch(command):
@@ -267,7 +299,9 @@ class Assistant:
             raise AssistantError("Set THEIA_CHAT_BACKEND to ollama or openai in .env and restart Theia to enable AI chat.")
         if cancel is not None and cancel.is_set():
             raise OperationCancelled
-        reply = voice_reply(answer) if schema is not None else Reply(answer, answer)
+        reply = voice_reply(answer) if schema is not None else (
+            Reply(answer, short_speech(answer)) if spoken else Reply(answer, answer)
+        )
         self.history = [*messages, {"role": "assistant", "content": reply.text}][-12:]
         return reply
 

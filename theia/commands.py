@@ -2,6 +2,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from datetime import datetime
 from difflib import get_close_matches
 from pathlib import Path
@@ -16,6 +17,8 @@ APPS = {
     "files": ("xdg-open", str(Path.home())),
     "terminal": ("ptyxis", "gnome-terminal", "konsole", "xfce4-terminal"),
     "calculator": ("gnome-calculator", "kcalc", "mate-calc"),
+    "editor": ("gnome-text-editor", "gedit", "kate", "kwrite"),
+    "settings": ("gnome-control-center", "systemsettings"),
 }
 
 TIME_FORMAT_REQUEST = re.compile(
@@ -53,10 +56,64 @@ def launch(name):
     return f"{name.capitalize()} is unavailable. Install an approved desktop app and try again."
 
 
+def pipewire_volume():
+    executable = shutil.which("wpctl")
+    if not executable:
+        return None
+    try:
+        result = subprocess.run(
+            [executable, "get-volume", "@DEFAULT_AUDIO_SINK@"],
+            capture_output=True, text=True, check=True, timeout=2,
+        )
+        line = result.stdout.strip()
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] == "Volume:":
+            vol = round(float(parts[1]) * 100)
+            muted = "[MUTED]" in line
+            return vol, muted
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    return None
+
+
+def set_pipewire_volume(arg):
+    executable = shutil.which("wpctl")
+    if not executable:
+        return "Audio volume control is unavailable."
+    try:
+        subprocess.run(
+            [executable, "set-volume", "@DEFAULT_AUDIO_SINK@", arg],
+            check=True, timeout=2, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        info = pipewire_volume()
+        if info is not None:
+            vol, muted = info
+            status = " (muted)" if muted else ""
+            return f"Volume is now {vol}%{status}."
+        return "Volume adjusted."
+    except (OSError, subprocess.SubprocessError):
+        return "Couldn't adjust volume."
+
+
+def set_pipewire_mute(mute=True):
+    executable = shutil.which("wpctl")
+    if not executable:
+        return "Audio mute control is unavailable."
+    try:
+        subprocess.run(
+            [executable, "set-mute", "@DEFAULT_AUDIO_SINK@", "1" if mute else "0"],
+            check=True, timeout=2, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        return "Audio muted." if mute else "Audio unmuted."
+    except (OSError, subprocess.SubprocessError):
+        return "Couldn't change mute status."
+
+
 def normalize_command(message, *, preserve_case=False):
     command = " ".join((message if preserve_case else message.casefold()).split())
     command = re.sub(r"^(?:(?:hello|hey|hi)[, ]+)?(?:theia|thea|jarvis)(?: *[,.!:] *| +)", "", command,
                      flags=re.IGNORECASE)
+    command = re.sub(r"^(?:please\s+|(?:can|could|would)\s+you\s+(?:please\s+)?)", "", command, flags=re.IGNORECASE)
     return command.rstrip(".!? ")
 
 
@@ -120,4 +177,48 @@ def local_reply(message, launcher=launch, *, preferences=None, recorded=False):
             period = "AM" if now.hour < 12 else "PM"
             return f"It's {now.hour % 12 or 12}:{now.minute:02d} {period} local time."
         return now.strftime("It's %H:%M local time.")
+    if command in {
+        "what day is it", "what day is today", "what day is it today", "day of the week",
+        "what is the date", "what is today's date", "what is the date today", "check date",
+        "check today's date", "today's date", "date",
+    }:
+        now = datetime.now()
+        return now.strftime("Today is %A, %B %d, %Y.")
+    if command in {
+        "check battery", "battery", "battery status", "check battery level",
+        "check battery percentage", "how much battery do i have", "battery level",
+    }:
+        battery = psutil.sensors_battery()
+        if battery is None:
+            return "No battery detected (running on AC power or battery status unavailable)."
+        percent = round(battery.percent)
+        status = "charging" if battery.power_plugged else "on battery power"
+        return f"Battery is at {percent}% ({status})."
+    if command in {
+        "check uptime", "uptime", "system uptime",
+        "how long has the system been up", "how long has my computer been on",
+    }:
+        boot = time.time() - psutil.boot_time()
+        hours = int(boot // 3600)
+        minutes = int((boot % 3600) // 60)
+        if hours > 0:
+            return f"System uptime is {hours} hours and {minutes} minutes."
+        return f"System uptime is {minutes} minutes."
+    if command in {"check volume", "volume", "what is the volume", "get volume", "sound volume"}:
+        info = pipewire_volume()
+        if info is not None:
+            vol, muted = info
+            return f"Volume is {vol}% (muted)." if muted else f"Volume is {vol}%."
+        return "Audio volume information is unavailable."
+    if command in {"mute", "mute audio", "mute sound"}:
+        return set_pipewire_mute(True)
+    if command in {"unmute", "unmute audio", "unmute sound"}:
+        return set_pipewire_mute(False)
+    if command in {"increase volume", "volume up", "turn up the volume", "turn up volume", "louder"}:
+        return set_pipewire_volume("10%+")
+    if command in {"decrease volume", "volume down", "turn down the volume", "turn down volume", "quieter", "lower volume"}:
+        return set_pipewire_volume("10%-")
+    if match := re.fullmatch(r"set (?:the )?volume (?:to )?(\d{1,3})\s*%?", command):
+        vol = max(0, min(100, int(match[1])))
+        return set_pipewire_volume(f"{vol}%")
     return None

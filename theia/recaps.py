@@ -1,6 +1,7 @@
 import sqlite3
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 
 from theia.errors import AssistantError
 
@@ -20,13 +21,13 @@ def title_key(title):
 
 class Recaps:
     def __init__(self, path):
-        self.path = path
+        self.path = Path(path)
 
     @contextmanager
     def database(self):
         try:
             self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            with closing(sqlite3.connect(self.path, timeout=0.3)) as db, db:
+            with closing(sqlite3.connect(self.path, timeout=5.0)) as db, db:
                 db.execute("CREATE TABLE IF NOT EXISTS recaps (key TEXT PRIMARY KEY, title TEXT, text TEXT)")
                 yield db
         except sqlite3.IntegrityError as error:

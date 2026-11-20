@@ -94,6 +94,15 @@ class VoiceOrb(QWidget):
         self.timer.timeout.connect(self.advance)
         self.timer.start(50)
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self.timer.isActive():
+            self.timer.start(50)
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self.timer.stop()
+
     def advance(self):
         self.phase = (self.phase + (4 if self.active else 1)) % 360
         self.update()

@@ -1,5 +1,8 @@
 import json
+import os
+import re
 from http.client import HTTPConnection, HTTPException
+from urllib.parse import urlparse
 
 from theia.errors import AssistantError
 
@@ -7,9 +10,30 @@ from theia.errors import AssistantError
 DEFAULT_MODEL = "qwen3:1.7b"
 
 
+def parse_ollama_host(raw):
+    raw = (raw or "").strip()
+    if not raw:
+        return "127.0.0.1", 11434
+    if "://" not in raw:
+        raw = f"http://{raw}"
+    parsed = urlparse(raw)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or 11434
+    return host, port
+
+
+def sanitize_reply(text):
+    if not isinstance(text, str):
+        return ""
+    cleaned = re.sub(r"<think>[\s\S]*?</think>", "", text).strip()
+    return cleaned if cleaned else text.strip()
+
+
 class OllamaChat:
-    def __init__(self, model=DEFAULT_MODEL):
+    def __init__(self, model=DEFAULT_MODEL, host=None):
         self.model = model
+        raw_host = host or os.environ.get("THEIA_OLLAMA_HOST") or os.environ.get("OLLAMA_HOST")
+        self.host, self.port = parse_ollama_host(raw_host)
 
     def reply(self, messages, *, schema=None):
         payload = {
@@ -22,7 +46,7 @@ class OllamaChat:
         }
         if schema is not None:
             payload["format"] = schema
-        connection = HTTPConnection("127.0.0.1", 11434, timeout=120)
+        connection = HTTPConnection(self.host, self.port, timeout=120)
         try:
             connection.request(
                 "POST", "/api/chat", body=json.dumps(payload), headers={"Content-Type": "application/json"},
@@ -45,6 +69,7 @@ class OllamaChat:
         finally:
             connection.close()
 
+        result = sanitize_reply(result)
         if not isinstance(result, str) or not result.strip():
             raise AssistantError("The local model returned an empty reply.")
         return result.strip()

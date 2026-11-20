@@ -4,7 +4,7 @@ from queue import Empty, Queue
 from threading import Event, Thread
 
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QFontDatabase, QKeySequence, QPalette
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QKeySequence, QPalette, QShortcut
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QPlainTextEdit, QProgressBar, QPushButton, QSizePolicy, QTextBrowser, QVBoxLayout, QWidget,
@@ -112,6 +112,9 @@ class Job(QRunnable):
         except OperationCancelled:
             pass
         except AssistantError as error:
+            if self.attachment is not None:
+                doc_name = self.assistant.document.name if self.assistant.document is not None else ""
+                self.signals.attached.emit(doc_name)
             self.signals.message.emit("System", str(error))
         except Exception:
             self.signals.message.emit("System", "Something went wrong while processing that request.")
@@ -211,7 +214,25 @@ class Window(QMainWindow):
         self.monitor.start(1000)
         self.update_metrics()
         self.check_reminders()
+        self.clear_shortcut = QShortcut(QKeySequence("Ctrl+L"), self)
+        self.clear_shortcut.activated.connect(self.clear_chat)
+        self.escape_shortcut = QShortcut(QKeySequence("Escape"), self)
+        self.escape_shortcut.activated.connect(self.handle_escape)
         self.entry.setFocus()
+
+    def clear_chat(self):
+        self.transcript.clear()
+        self.assistant.history.clear()
+        self.assistant.active_recap = None
+        self.add_message("System", "Conversation cleared.")
+
+    def handle_escape(self):
+        if self.stop_voice.isEnabled():
+            self.stop_speaking()
+        elif self.job is not None:
+            self.job.abort()
+        elif self.correcting:
+            self.cancel_correction()
 
     def conversation_card(self):
         card, chat = make_card()
@@ -482,10 +503,11 @@ class Window(QMainWindow):
         if self.closing:
             return
         colors = {"You": "#a4e1e0", NAME: "#c7b8ff", "System": "#ffc999"}
+        sender_color = colors.get(sender, "#d8daf2")
         safe_text = escape(text).replace("\n", "<br>")
         self.transcript.append(
             f'<p style="margin:8px 0 14px; line-height:145%">'
-            f'<span style="color:{colors[sender]}; font-weight:700">{sender}</span>'
+            f'<span style="color:{sender_color}; font-weight:700">{sender}</span>'
             f'<br>{safe_text}</p>'
         )
         scroll = self.transcript.verticalScrollBar()

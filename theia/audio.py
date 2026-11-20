@@ -81,7 +81,11 @@ def collect_speech(frames, stream, vad, rate, stop, start_timeout, snapshot=None
                 raise AssistantError("The microphone disconnected.")
             continue
 
-        voiced = vad.is_speech(frame, rate)
+        expected_frame_bytes = rate * FRAME_MS // 1000 * 2
+        try:
+            voiced = vad.is_speech(frame, rate) if len(frame) == expected_frame_bytes else False
+        except Exception:
+            voiced = False
         if clip:
             clip.append(frame)
             silence = 0 if voiced else silence + 1

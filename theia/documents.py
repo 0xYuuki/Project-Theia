@@ -80,10 +80,12 @@ class Document:
             raise AssistantError("Choose a file under 10 MB.")
         if suffix == ".pdf":
             raw = extract_pdf(raw, cancel)
-        try:
-            text = raw.decode("utf-8-sig")
-        except UnicodeError as error:
-            raise AssistantError("Save the text file as UTF-8 and try again.") from error
+            text = raw.decode("utf-8-sig", errors="replace")
+        else:
+            try:
+                text = raw.decode("utf-8-sig")
+            except UnicodeError as error:
+                raise AssistantError("Save the text file as UTF-8 and try again.") from error
         if len(text) > MAX_TEXT:
             raise AssistantError("This file contains too much text. Attach a shorter section.")
         if suffix == ".pdf":

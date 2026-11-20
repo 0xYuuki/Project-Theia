@@ -40,7 +40,7 @@ class Reminders:
             if create:
                 self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             uri = self.path.resolve().as_uri() + ("?mode=rwc" if create else "?mode=rw")
-            with closing(sqlite3.connect(uri, timeout=0.3, uri=True)) as connection, connection:
+            with closing(sqlite3.connect(uri, timeout=5.0, uri=True)) as connection, connection:
                 if create:
                     connection.execute(
                         "CREATE TABLE IF NOT EXISTS reminders("
@@ -102,7 +102,7 @@ def next_clock_time(text, now):
         if not 1 <= hour <= 12:
             return None
         hour = hour % 12 + (12 if period.startswith("p") else 0)
-    elif raw_minute is None or hour > 23:
+    elif hour > 23:
         return None
     if minute > 59:
         return None
@@ -116,6 +116,7 @@ def next_clock_time(text, now):
 SET_TIMER = re.compile(r"set (?:a )?timer(?: for (.+))?", re.IGNORECASE)
 REMIND = re.compile(r"remind me(?: (.+))?", re.IGNORECASE)
 WHEN = re.compile(r"(at|in) (.+?)(?: to (.{1,240}))?", re.IGNORECASE)
+INVERTED_WHEN = re.compile(r"to (.{1,240}?)\s+(at|in) (.+)", re.IGNORECASE)
 PERIOD = r"[ap]\.?\s*m\.?"
 NEW_QUESTION = re.compile(r"(?:what|when|where|how|why|who|can|could|is|are|tell|explain|resume|let['’]s continue)\b")
 PERIOD_QUESTION = "Did you mean AM or PM? You can also say morning or evening."
@@ -143,8 +144,12 @@ class ReminderTurn:
     def reply(self, command, reminders, time_format, *, now=None):
         now = time.time() if now is None else now
         draft, self.draft = self.draft, None
-        lower = command.casefold()
-        if lower in {"list reminders", "show reminders", "list timers"}:
+        lower = command.casefold().rstrip(".!? ")
+        if lower in {
+            "list reminders", "show reminders", "list timers", "show timers",
+            "what are my reminders", "what reminders do i have", "check reminders",
+            "check timers", "my reminders", "view reminders",
+        }:
             pending = reminders.pending()
             if not pending:
                 return "You have no pending timers or reminders."
@@ -159,6 +164,9 @@ class ReminderTurn:
             if request := WHEN.fullmatch(reminder[1] or ""):
                 draft.when = f"{request[1]} {request[2]}"
                 draft.label = request[3] or ""
+            elif reminder[1] and (inv := INVERTED_WHEN.fullmatch(reminder[1])):
+                draft.label = inv[1].strip()
+                draft.when = f"{inv[2]} {inv[3]}".strip()
             elif reminder[1] and reminder[1].casefold().startswith("to "):
                 draft.label = reminder[1][3:][:240]
             elif reminder[1] and (near := re.fullmatch(r"of (\w{1,10})", reminder[1], re.IGNORECASE)):

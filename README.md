@@ -13,7 +13,7 @@ python3 -m venv .venv
 .venv/bin/python main.py
 ```
 
-Try `help`, `check CPU`, `check RAM`, `check disk`, `what time is it`, or `open firefox`. The launcher also accepts `files`, `terminal`, and `calculator` when a supported app is installed.
+Try `help`, `check CPU`, `check RAM`, `check disk`, `what time is it`, `what day is it`, `what is the date`, `check battery`, `check uptime`, `check volume`, `set volume to 50%`, or `open firefox`. The launcher also accepts `files`, `terminal`, `calculator`, `editor`, and `settings` when a supported app is installed. You can also press **Esc** to cancel an active turn or speech, and **Ctrl+L** to clear the conversation.
 
 ## Use offline voice commands
 
@@ -138,7 +138,11 @@ Open **Saved conversations → Save recap** to draft a recap of the recent local
 
 ## Timers and reminders
 
-Say or type “Set a timer for 10 minutes,” “Remind me in 20 minutes to check the oven,” or “Remind me at 6 PM to check the oven.” A clock time means the next occurrence in your local time. Open **Reminders** to see or cancel pending items.
+Say or type “Set a timer for 10 minutes,” “Remind me in 20 minutes to check the oven,” “Remind me at 6 PM to check the oven,” or “Remind me to check the oven in 20 minutes.” A clock time means the next occurrence in your local time. Say or type “What are my reminders?” or open **Reminders** to see or cancel pending items.
+
+### Quick notes
+
+Say or type “Take a note: Buy groceries tomorrow” or “Note: Meeting notes.” Review your notes at any time with “Read my notes” or “List notes,” and clear them with “Clear my notes.” Notes are saved locally in SQLite.
 
 You can start with “Remind me at six.” When Theia asks, say “PM,” then “Check the oven.” Say “Cancel that” to discard the unfinished reminder. A hands-free draft ends when the follow-up window expires. If you use typed chat or **Record**, respond to each follow-up within 60 seconds.
 
